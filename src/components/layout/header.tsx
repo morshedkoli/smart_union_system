@@ -9,6 +9,7 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { useAuth } from "@/components/providers/auth-provider";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -39,6 +40,7 @@ export function Header({ sidebarCollapsed }: HeaderProps) {
   const t = useTranslations();
   const locale = useLocale();
   const router = useRouter();
+  const { user, logout } = useAuth();
   const [searchQuery, setSearchQuery] = React.useState("");
   const [notificationCount, setNotificationCount] = React.useState(0);
   const [alerts, setAlerts] = React.useState<NotificationAlert[]>([]);
@@ -71,6 +73,24 @@ export function Header({ sidebarCollapsed }: HeaderProps) {
   const openAlert = (alert: NotificationAlert) => {
     const localPath = alert.link.startsWith("/") ? alert.link : `/${alert.link}`;
     router.push(`/${locale}${localPath}`);
+  };
+
+  const handleLogout = async () => {
+    await logout();
+  };
+
+  const handleProfileClick = () => {
+    router.push(`/${locale}/dashboard/profile`);
+  };
+
+  // Get user initials for avatar
+  const getUserInitials = () => {
+    if (!user?.name) return "U";
+    const names = user.name.split(" ");
+    if (names.length >= 2) {
+      return `${names[0][0]}${names[1][0]}`.toUpperCase();
+    }
+    return user.name.substring(0, 2).toUpperCase();
   };
 
   return (
@@ -164,27 +184,27 @@ export function Header({ sidebarCollapsed }: HeaderProps) {
           <DropdownMenuTrigger asChild>
             <Button variant="ghost" className="relative h-9 w-9 rounded-full">
               <Avatar className="h-9 w-9">
-                <AvatarImage src="/avatars/user.png" alt="User" />
-                <AvatarFallback>AD</AvatarFallback>
+                <AvatarImage src="/avatars/user.png" alt={user?.name || "User"} />
+                <AvatarFallback>{getUserInitials()}</AvatarFallback>
               </Avatar>
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent className="w-56" align="end" forceMount>
             <DropdownMenuLabel className="font-normal">
               <div className="flex flex-col space-y-1">
-                <p className="text-sm font-medium leading-none">Admin User</p>
+                <p className="text-sm font-medium leading-none">{user?.name || "User"}</p>
                 <p className="text-xs leading-none text-muted-foreground">
-                  admin@smartunion.gov.bd
+                  {user?.email || ""}
                 </p>
               </div>
             </DropdownMenuLabel>
             <DropdownMenuSeparator />
-            <DropdownMenuItem>
+            <DropdownMenuItem onClick={handleProfileClick} className="cursor-pointer">
               <User className="mr-2 h-4 w-4" />
               <span>{t("navigation.profile")}</span>
             </DropdownMenuItem>
             <DropdownMenuSeparator />
-            <DropdownMenuItem className="text-destructive">
+            <DropdownMenuItem onClick={handleLogout} className="text-destructive cursor-pointer">
               <LogOut className="mr-2 h-4 w-4" />
               <span>{t("auth.logout")}</span>
             </DropdownMenuItem>

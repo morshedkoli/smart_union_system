@@ -47,9 +47,9 @@ export function hasPermission(userRole: Role, requiredRoles: Role[]): boolean {
 }
 
 export function isAdmin(role: Role): boolean {
-  return role === "SUPER_ADMIN" || role === "ADMIN";
+  return role === "SECRETARY"; // SECRETARY is the super admin
 }
 
 export function isSuperAdmin(role: Role): boolean {
-  return role === "SUPER_ADMIN";
+  return role === "SECRETARY"; // SECRETARY is the super admin
 }

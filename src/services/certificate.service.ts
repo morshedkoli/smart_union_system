@@ -1,18 +1,26 @@
-import mongoose from "mongoose";
 import QRCode from "qrcode";
-import { connectDB } from "@/lib/mongodb";
+import { prisma } from "@/lib/db";
 import {
-  Certificate,
-  CertificateStatus,
-  CertificateType,
-  ICertificate,
-  Citizen,
-  CertificateTemplate,
-} from "@/models";
-import { AuditLog, AuditAction, EntityType, Severity } from "@/models/AuditLog";
+  generateCertificateNo,
+  generateCertificateReferenceNo,
+  isValidObjectId,
+} from "@/lib/prisma-utils";
+import { isCertificateValid } from "@/lib/prisma-virtuals";
+import { deepSanitize } from "@/lib/sanitize";
 import { CertificateTemplateService } from "./certificate-template.service";
 import { HoldingTaxService } from "./holding-tax.service";
-import { deepSanitize } from "@/lib/sanitize";
+import type {
+  Certificate,
+  CertificateTemplate,
+  Citizen,
+  CertificateType,
+  CertificateStatus,
+  Prisma,
+  PrintHistoryEntry,
+} from "@prisma/client";
+
+// Re-export enum values for backward compatibility
+export { CertificateType, CertificateStatus } from "@prisma/client";
 
 interface CreateCertificateData {
   citizenId: string;
@@ -26,187 +34,145 @@ interface UpdateCertificateData {
   dataSnapshot?: Record<string, unknown>;
 }
 
+export interface CertificateWithRelations extends Certificate {
+  citizen?: Pick<Citizen, "id" | "name" | "nameBn" | "nid" | "fatherName">;
+  template?: Pick<CertificateTemplate, "id" | "name" | "nameBn"> | null;
+}
+
 const SYSTEM_USER_ID = "000000000000000000000001";
 
+async function logAudit(
+  tx: Prisma.TransactionClient,
+  data: {
+    userId: string;
+    action: string;
+    entityType: string;
+    entityId: string;
+    entityName?: string;
+    description?: string;
+    severity?: string;
+    changes?: object;
+  }
+): Promise<void> {
+  try {
+    if (isValidObjectId(data.userId)) {
+      await tx.auditLog.create({
+        data: {
+          userId: data.userId,
+          action: data.action,
+          entityType: data.entityType,
+          entityId: data.entityId,
+          entityName: data.entityName,
+          description: data.description,
+          severity: data.severity || "LOW",
+          changes: data.changes,
+        },
+      });
+    }
+  } catch {
+    console.error("Failed to create audit log");
+  }
+}
+
 export class CertificateService {
-  static async list(status?: CertificateStatus): Promise<ICertificate[]> {
-    await connectDB();
-    const filter: Record<string, unknown> = {};
+  static async list(status?: CertificateStatus): Promise<CertificateWithRelations[]> {
+    const where: Prisma.CertificateWhereInput = {
+      deletedAt: null,
+    };
+
     if (status) {
-      filter.status = status;
+      where.status = status;
     }
 
-    const certificates = await Certificate.find(filter)
-      .populate("citizen", "name nameBn nid")
-      .populate("template", "name nameBn")
-      .sort({ createdAt: -1 })
-      .lean();
+    const certificates = await prisma.certificate.findMany({
+      where,
+      include: {
+        citizen: {
+          select: { id: true, name: true, nameBn: true, nid: true, fatherName: true },
+        },
+        template: {
+          select: { id: true, name: true, nameBn: true },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+    });
 
-    return certificates as ICertificate[];
+    return certificates;
   }
 
-  static async getById(id: string): Promise<ICertificate | null> {
-    await connectDB();
-    if (!mongoose.Types.ObjectId.isValid(id)) {
+  static async getById(id: string): Promise<CertificateWithRelations | null> {
+    if (!isValidObjectId(id)) {
       return null;
     }
-    const certificate = await Certificate.findById(id)
-      .populate("citizen", "name nameBn fatherName nid")
-      .populate("template", "name nameBn")
-      .lean();
-    return certificate as ICertificate | null;
+
+    const certificate = await prisma.certificate.findUnique({
+      where: { id },
+      include: {
+        citizen: {
+          select: { id: true, name: true, nameBn: true, nid: true, fatherName: true },
+        },
+        template: {
+          select: { id: true, name: true, nameBn: true },
+        },
+      },
+    });
+
+    return certificate;
+  }
+
+  static async getByReferenceNo(referenceNo: string): Promise<CertificateWithRelations | null> {
+    const certificate = await prisma.certificate.findFirst({
+      where: { referenceNo, deletedAt: null },
+      include: {
+        citizen: {
+          select: { id: true, name: true, nameBn: true, nid: true, fatherName: true },
+        },
+        template: {
+          select: { id: true, name: true, nameBn: true },
+        },
+      },
+    });
+
+    return certificate;
   }
 
   static async create(
     data: CreateCertificateData,
     userId?: string
-  ): Promise<{ success: boolean; certificate?: ICertificate; message: string }> {
-    await connectDB();
+  ): Promise<{ success: boolean; certificate?: CertificateWithRelations; message: string }> {
+    // Sanitize input
+    const sanitizedData = deepSanitize(data);
 
-    const session = await mongoose.startSession();
-    session.startTransaction();
-
-    try {
-      // Sanitize input
-      const sanitizedData = deepSanitize(data);
-
-      if (!mongoose.Types.ObjectId.isValid(sanitizedData.citizenId)) {
-        await session.abortTransaction();
-        return { success: false, message: "Invalid citizen ID" };
-      }
-      if (!mongoose.Types.ObjectId.isValid(sanitizedData.templateId)) {
-        await session.abortTransaction();
-        return { success: false, message: "Invalid template ID" };
-      }
-
-      const [citizen, template] = await Promise.all([
-        Citizen.findById(sanitizedData.citizenId).session(session).lean(),
-        CertificateTemplate.findById(sanitizedData.templateId).session(session).lean(),
-      ]);
-
-      if (!citizen) {
-        await session.abortTransaction();
-        return { success: false, message: "Citizen not found" };
-      }
-      if (!template) {
-        await session.abortTransaction();
-        return { success: false, message: "Template not found" };
-      }
-
-      const certificateNo = await (
-        Certificate as typeof Certificate & {
-          generateCertificateNo: (type: CertificateType, year?: number) => Promise<string>;
-        }
-      ).generateCertificateNo(sanitizedData.type);
-
-      // Generate unique reference number
-      const timestamp = Date.now();
-      const random = Math.random().toString(36).substring(2, 8).toUpperCase();
-      const referenceNo = `REF-${timestamp}-${random}`;
-
-      const finalText = CertificateTemplateService.buildPreviewHtml(
-        {
-          headerHtml: template.headerHtml,
-          bodyHtml: template.bodyHtml,
-          footerHtml: template.footerHtml,
-          stylesCss: template.stylesCss,
-        },
-        sanitizedData.dataSnapshot
-      );
-
-      const ownerId =
-        userId && mongoose.Types.ObjectId.isValid(userId) ? userId : SYSTEM_USER_ID;
-
-      const [certificate] = await Certificate.create([{
-        certificateNo,
-        referenceNo,
-        type: sanitizedData.type,
-        citizen: new mongoose.Types.ObjectId(sanitizedData.citizenId),
-        applicantName: (sanitizedData.dataSnapshot?.name as string) || (citizen.name as string),
-        applicantNameBn: citizen.nameBn,
-        finalText,
-        dataSnapshot: sanitizedData.dataSnapshot,
-        status: CertificateStatus.DRAFT,
-        metadata: {},
-        fee: template.fee || 0,
-        feePaid: true,
-        template: new mongoose.Types.ObjectId(sanitizedData.templateId),
-        qrCode: referenceNo,
-        qrData: referenceNo,
-        verificationUrl: `/verify/${referenceNo}`,
-        createdBy: new mongoose.Types.ObjectId(ownerId),
-        updatedBy: new mongoose.Types.ObjectId(ownerId),
-      }], { session });
-
-      // Log audit
-      await AuditLog.log({
-        user: new mongoose.Types.ObjectId(ownerId),
-        action: AuditAction.CREATE,
-        entityType: EntityType.CERTIFICATE,
-        entityId: certificate._id,
-        entityName: certificate.applicantName,
-        description: `Certificate draft created: ${certificateNo} for ${citizen.name}`,
-        severity: Severity.LOW,
-      });
-
-      await session.commitTransaction();
-
-      return {
-        success: true,
-        certificate: certificate.toObject() as ICertificate,
-        message: "Certificate draft created successfully",
-      };
-    } catch (error) {
-      await session.abortTransaction();
-      throw error;
-    } finally {
-      session.endSession();
+    if (!isValidObjectId(sanitizedData.citizenId)) {
+      return { success: false, message: "Invalid citizen ID" };
     }
-  }
-
-  static async update(
-    id: string,
-    data: UpdateCertificateData,
-    userId?: string
-  ): Promise<{ success: boolean; certificate?: ICertificate; message: string }> {
-    await connectDB();
-
-    const session = await mongoose.startSession();
-    session.startTransaction();
+    if (!isValidObjectId(sanitizedData.templateId)) {
+      return { success: false, message: "Invalid template ID" };
+    }
 
     try {
-      if (!mongoose.Types.ObjectId.isValid(id)) {
-        await session.abortTransaction();
-        return { success: false, message: "Invalid certificate ID" };
-      }
+      const certificate = await prisma.$transaction(async (tx) => {
+        const [citizen, template] = await Promise.all([
+          tx.citizen.findUnique({
+            where: { id: sanitizedData.citizenId },
+          }),
+          tx.certificateTemplate.findUnique({
+            where: { id: sanitizedData.templateId },
+          }),
+        ]);
 
-      // Sanitize input
-      const sanitizedData = deepSanitize(data);
+        if (!citizen) {
+          throw new Error("Citizen not found");
+        }
+        if (!template) {
+          throw new Error("Template not found");
+        }
 
-      const certificate = await Certificate.findById(id).session(session).populate("template");
-      if (!certificate) {
-        await session.abortTransaction();
-        return { success: false, message: "Certificate not found" };
-      }
+        // Generate certificate and reference numbers
+        const certificateNo = await generateCertificateNo(tx, sanitizedData.type);
+        const referenceNo = await generateCertificateReferenceNo(tx, sanitizedData.type);
 
-      if (certificate.status === CertificateStatus.APPROVED) {
-        await session.abortTransaction();
-        return { success: false, message: "Approved certificate is locked and cannot be edited" };
-      }
-
-      // Track changes
-      const changes: { before: Record<string, unknown>; after: Record<string, unknown> } = {
-        before: {},
-        after: {},
-      };
-
-      if (sanitizedData.dataSnapshot) {
-        const template = certificate.template as unknown as {
-          headerHtml?: string;
-          bodyHtml: string;
-          footerHtml?: string;
-          stylesCss?: string;
-        };
+        // Generate final text from template
         const finalText = CertificateTemplateService.buildPreviewHtml(
           {
             headerHtml: template.headerHtml,
@@ -214,184 +180,353 @@ export class CertificateService {
             footerHtml: template.footerHtml,
             stylesCss: template.stylesCss,
           },
-          sanitizedData.dataSnapshot
+          sanitizedData.dataSnapshot as { name?: string; father_name?: string }
         );
 
-        changes.before.dataSnapshot = certificate.dataSnapshot;
-        changes.after.dataSnapshot = sanitizedData.dataSnapshot;
+        const ownerId =
+          userId && isValidObjectId(userId) ? userId : SYSTEM_USER_ID;
 
-        certificate.dataSnapshot = sanitizedData.dataSnapshot;
-        certificate.finalText = finalText;
-        if (sanitizedData.dataSnapshot.name) {
-          certificate.applicantName = sanitizedData.dataSnapshot.name as string;
-        }
-      }
-
-      if (sanitizedData.finalText) {
-        changes.before.finalText = certificate.finalText;
-        changes.after.finalText = sanitizedData.finalText;
-        certificate.finalText = sanitizedData.finalText;
-      }
-
-      if (userId && mongoose.Types.ObjectId.isValid(userId)) {
-        certificate.updatedBy = new mongoose.Types.ObjectId(userId);
-      }
-
-      await certificate.save({ session });
-
-      // Log audit
-      if (userId && (changes.before.dataSnapshot || changes.before.finalText)) {
-        await AuditLog.log({
-          user: new mongoose.Types.ObjectId(userId),
-          action: AuditAction.UPDATE,
-          entityType: EntityType.CERTIFICATE,
-          entityId: certificate._id,
-          entityName: certificate.applicantName,
-          description: `Certificate updated: ${certificate.certificateNo}`,
-          changes,
-          severity: Severity.LOW,
+        const created = await tx.certificate.create({
+          data: {
+            certificateNo,
+            referenceNo,
+            type: sanitizedData.type,
+            citizenId: sanitizedData.citizenId,
+            templateId: sanitizedData.templateId,
+            applicantName: (sanitizedData.dataSnapshot?.name as string) || citizen.name,
+            applicantNameBn: citizen.nameBn,
+            finalText,
+            metadata: {
+              customFields: sanitizedData.dataSnapshot,
+            },
+            status: "PENDING",
+            fee: template.fee || 0,
+            feeStatus: "UNPAID",
+            qrCode: referenceNo,
+            verificationUrl: `/verify/${referenceNo}`,
+            issuedById: ownerId,
+            createdById: ownerId,
+            updatedById: ownerId,
+          },
+          include: {
+            citizen: {
+              select: { id: true, name: true, nameBn: true, nid: true, fatherName: true },
+            },
+            template: {
+              select: { id: true, name: true, nameBn: true },
+            },
+          },
         });
-      }
 
-      await session.commitTransaction();
+        // Log audit
+        await logAudit(tx, {
+          userId: ownerId,
+          action: "CREATE",
+          entityType: "CERTIFICATE",
+          entityId: created.id,
+          entityName: created.applicantName || undefined,
+          description: `Certificate draft created: ${certificateNo} for ${citizen.name}`,
+          severity: "LOW",
+        });
+
+        return created;
+      });
 
       return {
         success: true,
-        certificate: certificate.toObject() as ICertificate,
+        certificate,
+        message: "Certificate draft created successfully",
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : "Failed to create certificate",
+      };
+    }
+  }
+
+  static async update(
+    id: string,
+    data: UpdateCertificateData,
+    userId?: string
+  ): Promise<{ success: boolean; certificate?: CertificateWithRelations; message: string }> {
+    if (!isValidObjectId(id)) {
+      return { success: false, message: "Invalid certificate ID" };
+    }
+
+    // Sanitize input
+    const sanitizedData = deepSanitize(data);
+
+    try {
+      const certificate = await prisma.$transaction(async (tx) => {
+        const existing = await tx.certificate.findUnique({
+          where: { id },
+          include: {
+            template: true,
+          },
+        });
+
+        if (!existing) {
+          throw new Error("Certificate not found");
+        }
+
+        if (existing.status === "APPROVED") {
+          throw new Error("Approved certificate is locked and cannot be edited");
+        }
+
+        // Track changes
+        const changes: { before: Record<string, unknown>; after: Record<string, unknown> } = {
+          before: {},
+          after: {},
+        };
+
+        const updateData: Prisma.CertificateUpdateInput = {};
+
+        if (sanitizedData.dataSnapshot && existing.template) {
+          const finalText = CertificateTemplateService.buildPreviewHtml(
+            {
+              headerHtml: existing.template.headerHtml,
+              bodyHtml: existing.template.bodyHtml,
+              footerHtml: existing.template.footerHtml,
+              stylesCss: existing.template.stylesCss,
+            },
+            sanitizedData.dataSnapshot as { name?: string; father_name?: string }
+          );
+
+          changes.before.dataSnapshot = existing.metadata;
+          changes.after.dataSnapshot = sanitizedData.dataSnapshot;
+
+          updateData.metadata = {
+            customFields: sanitizedData.dataSnapshot,
+          };
+          updateData.finalText = finalText;
+
+          if (sanitizedData.dataSnapshot.name) {
+            updateData.applicantName = sanitizedData.dataSnapshot.name as string;
+          }
+        }
+
+        if (sanitizedData.finalText) {
+          changes.before.finalText = existing.finalText;
+          changes.after.finalText = sanitizedData.finalText;
+          updateData.finalText = sanitizedData.finalText;
+        }
+
+        if (userId && isValidObjectId(userId)) {
+          updateData.updatedById = userId;
+        }
+
+        await tx.certificate.updateMany({
+          where: { id },
+          data: updateData,
+        });
+
+        const updated = await tx.certificate.findUnique({
+          where: { id },
+          include: {
+            citizen: {
+              select: { id: true, name: true, nameBn: true, nid: true, fatherName: true },
+            },
+            template: {
+              select: { id: true, name: true, nameBn: true },
+            },
+          },
+        });
+
+        if (!updated) {
+          throw new Error("Certificate not found after update");
+        }
+
+        // Log audit
+        if (userId && (changes.before.dataSnapshot || changes.before.finalText)) {
+          await logAudit(tx, {
+            userId,
+            action: "UPDATE",
+            entityType: "CERTIFICATE",
+            entityId: existing.id,
+            entityName: existing.applicantName || undefined,
+            description: `Certificate updated: ${existing.certificateNo}`,
+            severity: "LOW",
+            changes,
+          });
+        }
+
+        return updated;
+      });
+
+      return {
+        success: true,
+        certificate,
         message: "Certificate updated successfully",
       };
     } catch (error) {
-      await session.abortTransaction();
-      throw error;
-    } finally {
-      session.endSession();
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : "Failed to update certificate",
+      };
     }
   }
 
   static async submit(
     id: string,
     userId?: string
-  ): Promise<{ success: boolean; certificate?: ICertificate; message: string }> {
-    await connectDB();
-
-    const session = await mongoose.startSession();
-    session.startTransaction();
+  ): Promise<{ success: boolean; certificate?: CertificateWithRelations; message: string }> {
+    if (!isValidObjectId(id)) {
+      return { success: false, message: "Invalid certificate ID" };
+    }
 
     try {
-      if (!mongoose.Types.ObjectId.isValid(id)) {
-        await session.abortTransaction();
-        return { success: false, message: "Invalid certificate ID" };
-      }
-
-      const certificate = await Certificate.findById(id).session(session);
-      if (!certificate) {
-        await session.abortTransaction();
-        return { success: false, message: "Certificate not found" };
-      }
-      if (certificate.status === CertificateStatus.APPROVED) {
-        await session.abortTransaction();
-        return { success: false, message: "Approved certificate is already locked" };
-      }
-
-      certificate.status = CertificateStatus.SUBMITTED;
-      if (userId && mongoose.Types.ObjectId.isValid(userId)) {
-        certificate.updatedBy = new mongoose.Types.ObjectId(userId);
-      }
-
-      await certificate.save({ session });
-
-      // Log audit
-      if (userId) {
-        await AuditLog.log({
-          user: new mongoose.Types.ObjectId(userId),
-          action: AuditAction.UPDATE,
-          entityType: EntityType.CERTIFICATE,
-          entityId: certificate._id,
-          entityName: certificate.applicantName,
-          description: `Certificate submitted for approval: ${certificate.certificateNo}`,
-          severity: Severity.LOW,
+      const certificate = await prisma.$transaction(async (tx) => {
+        const existing = await tx.certificate.findUnique({
+          where: { id },
         });
-      }
 
-      await session.commitTransaction();
+        if (!existing) {
+          throw new Error("Certificate not found");
+        }
+        if (existing.status === "APPROVED") {
+          throw new Error("Approved certificate is already locked");
+        }
+
+        const updateData: Prisma.CertificateUpdateInput = {
+          status: "PENDING", // Using PENDING as submitted state
+        };
+
+        if (userId && isValidObjectId(userId)) {
+          updateData.updatedById = userId;
+        }
+
+        await tx.certificate.updateMany({
+          where: { id },
+          data: updateData,
+        });
+
+        const updated = await tx.certificate.findUnique({
+          where: { id },
+          include: {
+            citizen: {
+              select: { id: true, name: true, nameBn: true, nid: true, fatherName: true },
+            },
+            template: {
+              select: { id: true, name: true, nameBn: true },
+            },
+          },
+        });
+
+        if (!updated) {
+          throw new Error("Certificate not found after update");
+        }
+
+        // Log audit
+        if (userId) {
+          await logAudit(tx, {
+            userId,
+            action: "SUBMIT",
+            entityType: "CERTIFICATE",
+            entityId: existing.id,
+            entityName: existing.applicantName || undefined,
+            description: `Certificate submitted for approval: ${existing.certificateNo}`,
+            severity: "LOW",
+          });
+        }
+
+        return updated;
+      });
 
       return {
         success: true,
-        certificate: certificate.toObject() as ICertificate,
+        certificate,
         message: "Certificate submitted for approval",
       };
     } catch (error) {
-      await session.abortTransaction();
-      throw error;
-    } finally {
-      session.endSession();
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : "Failed to submit certificate",
+      };
     }
   }
 
   static async approve(
     id: string,
     userId?: string
-  ): Promise<{ success: boolean; certificate?: ICertificate; message: string }> {
-    await connectDB();
-
-    const session = await mongoose.startSession();
-    session.startTransaction();
+  ): Promise<{ success: boolean; certificate?: CertificateWithRelations; message: string }> {
+    if (!isValidObjectId(id)) {
+      return { success: false, message: "Invalid certificate ID" };
+    }
 
     try {
-      if (!mongoose.Types.ObjectId.isValid(id)) {
-        await session.abortTransaction();
-        return { success: false, message: "Invalid certificate ID" };
-      }
+      const certificate = await prisma.$transaction(async (tx) => {
+        const existing = await tx.certificate.findUnique({
+          where: { id },
+        });
 
-      const certificate = await Certificate.findById(id).session(session);
-      if (!certificate) {
-        await session.abortTransaction();
-        return { success: false, message: "Certificate not found" };
-      }
-      if (certificate.status === CertificateStatus.APPROVED) {
-        await session.abortTransaction();
-        return { success: false, message: "Certificate already approved" };
-      }
+        if (!existing) {
+          throw new Error("Certificate not found");
+        }
+        if (existing.status === "APPROVED") {
+          throw new Error("Certificate already approved");
+        }
 
-      const approverId =
-        userId && mongoose.Types.ObjectId.isValid(userId) ? userId : SYSTEM_USER_ID;
-      const verificationPath = `/verify/${certificate.referenceNo}`;
-      const qrCodeDataUrl = await QRCode.toDataURL(verificationPath);
+        const approverId =
+          userId && isValidObjectId(userId) ? userId : SYSTEM_USER_ID;
+        const verificationPath = `/verify/${existing.referenceNo}`;
+        const qrCodeDataUrl = await QRCode.toDataURL(verificationPath);
 
-      certificate.status = CertificateStatus.APPROVED;
-      certificate.approvedBy = new mongoose.Types.ObjectId(approverId);
-      certificate.approvedAt = new Date();
-      certificate.issueDate = new Date();
-      certificate.verificationUrl = verificationPath;
-      certificate.qrData = verificationPath;
-      certificate.qrCode = qrCodeDataUrl;
-      certificate.updatedBy = new mongoose.Types.ObjectId(approverId);
+        const now = new Date();
 
-      await certificate.save({ session });
+        await tx.certificate.updateMany({
+          where: { id },
+          data: {
+            status: "APPROVED",
+            approvedById: approverId,
+            approvedAt: now,
+            issuedAt: now,
+            verificationUrl: verificationPath,
+            qrCode: qrCodeDataUrl,
+            updatedById: approverId,
+          },
+        });
 
-      // Log audit
-      await AuditLog.log({
-        user: new mongoose.Types.ObjectId(approverId),
-        action: AuditAction.APPROVE,
-        entityType: EntityType.CERTIFICATE,
-        entityId: certificate._id,
-        entityName: certificate.applicantName,
-        description: `Certificate approved: ${certificate.certificateNo}`,
-        severity: Severity.MEDIUM,
+        const updated = await tx.certificate.findUnique({
+          where: { id },
+          include: {
+            citizen: {
+              select: { id: true, name: true, nameBn: true, nid: true, fatherName: true },
+            },
+            template: {
+              select: { id: true, name: true, nameBn: true },
+            },
+          },
+        });
+
+        if (!updated) {
+          throw new Error("Certificate not found after update");
+        }
+
+        // Log audit
+        await logAudit(tx, {
+          userId: approverId,
+          action: "APPROVE",
+          entityType: "CERTIFICATE",
+          entityId: existing.id,
+          entityName: existing.applicantName || undefined,
+          description: `Certificate approved: ${existing.certificateNo}`,
+          severity: "MEDIUM",
+        });
+
+        return updated;
       });
-
-      await session.commitTransaction();
 
       return {
         success: true,
-        certificate: certificate.toObject() as ICertificate,
+        certificate,
         message: "Certificate approved and locked",
       };
     } catch (error) {
-      await session.abortTransaction();
-      throw error;
-    } finally {
-      session.endSession();
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : "Failed to approve certificate",
+      };
     }
   }
 
@@ -399,63 +534,156 @@ export class CertificateService {
     id: string,
     reason: string,
     userId?: string
-  ): Promise<{ success: boolean; certificate?: ICertificate; message: string }> {
-    await connectDB();
-
-    const session = await mongoose.startSession();
-    session.startTransaction();
+  ): Promise<{ success: boolean; certificate?: CertificateWithRelations; message: string }> {
+    if (!isValidObjectId(id)) {
+      return { success: false, message: "Invalid certificate ID" };
+    }
 
     try {
-      if (!mongoose.Types.ObjectId.isValid(id)) {
-        await session.abortTransaction();
-        return { success: false, message: "Invalid certificate ID" };
-      }
+      const certificate = await prisma.$transaction(async (tx) => {
+        const existing = await tx.certificate.findUnique({
+          where: { id },
+        });
 
-      const certificate = await Certificate.findById(id).session(session);
-      if (!certificate) {
-        await session.abortTransaction();
-        return { success: false, message: "Certificate not found" };
-      }
+        if (!existing) {
+          throw new Error("Certificate not found");
+        }
 
-      if (certificate.status === CertificateStatus.APPROVED) {
-        await session.abortTransaction();
-        return { success: false, message: "Cannot reject approved certificate" };
-      }
+        if (existing.status === "APPROVED") {
+          throw new Error("Cannot reject approved certificate");
+        }
 
-      const rejectorId =
-        userId && mongoose.Types.ObjectId.isValid(userId) ? userId : SYSTEM_USER_ID;
+        const rejectorId =
+          userId && isValidObjectId(userId) ? userId : SYSTEM_USER_ID;
 
-      certificate.status = CertificateStatus.REJECTED;
-      certificate.rejectedBy = new mongoose.Types.ObjectId(rejectorId);
-      certificate.rejectedAt = new Date();
-      certificate.rejectionReason = reason;
-      certificate.updatedBy = new mongoose.Types.ObjectId(rejectorId);
+        await tx.certificate.updateMany({
+          where: { id },
+          data: {
+            status: "REJECTED",
+            rejectedAt: new Date(),
+            rejectionReason: reason,
+            updatedById: rejectorId,
+          },
+        });
 
-      await certificate.save({ session });
+        const updated = await tx.certificate.findUnique({
+          where: { id },
+          include: {
+            citizen: {
+              select: { id: true, name: true, nameBn: true, nid: true, fatherName: true },
+            },
+            template: {
+              select: { id: true, name: true, nameBn: true },
+            },
+          },
+        });
 
-      // Log audit
-      await AuditLog.log({
-        user: new mongoose.Types.ObjectId(rejectorId),
-        action: AuditAction.REJECT,
-        entityType: EntityType.CERTIFICATE,
-        entityId: certificate._id,
-        entityName: certificate.applicantName,
-        description: `Certificate rejected: ${certificate.certificateNo}. Reason: ${reason}`,
-        severity: Severity.MEDIUM,
+        if (!updated) {
+          throw new Error("Certificate not found after update");
+        }
+
+        // Log audit
+        await logAudit(tx, {
+          userId: rejectorId,
+          action: "REJECT",
+          entityType: "CERTIFICATE",
+          entityId: existing.id,
+          entityName: existing.applicantName || undefined,
+          description: `Certificate rejected: ${existing.certificateNo}. Reason: ${reason}`,
+          severity: "MEDIUM",
+        });
+
+        return updated;
       });
-
-      await session.commitTransaction();
 
       return {
         success: true,
-        certificate: certificate.toObject() as ICertificate,
+        certificate,
         message: "Certificate rejected",
       };
     } catch (error) {
-      await session.abortTransaction();
-      throw error;
-    } finally {
-      session.endSession();
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : "Failed to reject certificate",
+      };
+    }
+  }
+
+  static async revoke(
+    id: string,
+    reason: string,
+    userId?: string
+  ): Promise<{ success: boolean; certificate?: CertificateWithRelations; message: string }> {
+    if (!isValidObjectId(id)) {
+      return { success: false, message: "Invalid certificate ID" };
+    }
+
+    try {
+      const certificate = await prisma.$transaction(async (tx) => {
+        const existing = await tx.certificate.findUnique({
+          where: { id },
+        });
+
+        if (!existing) {
+          throw new Error("Certificate not found");
+        }
+
+        if (existing.status !== "APPROVED") {
+          throw new Error("Only approved certificates can be revoked");
+        }
+
+        const revokerId =
+          userId && isValidObjectId(userId) ? userId : SYSTEM_USER_ID;
+
+        await tx.certificate.updateMany({
+          where: { id },
+          data: {
+            status: "REVOKED",
+            rejectionReason: reason,
+            updatedById: revokerId,
+          },
+        });
+
+        const updated = await tx.certificate.findUnique({
+          where: { id },
+          include: {
+            citizen: {
+              select: { id: true, name: true, nameBn: true, nid: true, fatherName: true },
+            },
+            template: {
+              select: { id: true, name: true, nameBn: true },
+            },
+          },
+        });
+
+        if (!updated) {
+          throw new Error("Certificate not found after update");
+        }
+
+        // Log audit
+        await logAudit(tx, {
+          userId: revokerId,
+          action: "REVOKE",
+          entityType: "CERTIFICATE",
+          entityId: existing.id,
+          entityName: existing.applicantName || undefined,
+          description: `Certificate revoked: ${existing.certificateNo}. Reason: ${reason}`,
+          severity: "HIGH",
+        });
+
+        return updated;
+      });
+
+      return {
+        success: true,
+        certificate,
+        message: "Certificate revoked",
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : "Failed to revoke certificate",
+      };
     }
   }
 
@@ -465,20 +693,29 @@ export class CertificateService {
     certificate?: {
       referenceNo: string;
       certificateNo: string;
-      applicantName: string;
+      applicantName: string | null;
       type: CertificateType;
-      issueDate?: Date;
+      issuedAt: Date;
       status: CertificateStatus;
-      finalText: string;
-      verificationUrl: string;
+      finalText: string | null;
+      verificationUrl: string | null;
     };
     message: string;
   }> {
-    await connectDB();
-
-    const certificate = await Certificate.findOne({ referenceNo })
-      .select("referenceNo certificateNo applicantName type issueDate status finalText verificationUrl")
-      .lean();
+    const certificate = await prisma.certificate.findFirst({
+      where: { referenceNo, deletedAt: null },
+      select: {
+        referenceNo: true,
+        certificateNo: true,
+        applicantName: true,
+        type: true,
+        issuedAt: true,
+        status: true,
+        finalText: true,
+        verificationUrl: true,
+        validUntil: true,
+      },
+    });
 
     if (!certificate) {
       return {
@@ -488,19 +725,20 @@ export class CertificateService {
       };
     }
 
-    const isValid = certificate.status === CertificateStatus.APPROVED;
+    const isValid = isCertificateValid(certificate.status, certificate.validUntil);
+
     return {
       success: true,
       valid: isValid,
-      certificate: certificate as {
-        referenceNo: string;
-        certificateNo: string;
-        applicantName: string;
-        type: CertificateType;
-        issueDate?: Date;
-        status: CertificateStatus;
-        finalText: string;
-        verificationUrl: string;
+      certificate: {
+        referenceNo: certificate.referenceNo,
+        certificateNo: certificate.certificateNo,
+        applicantName: certificate.applicantName,
+        type: certificate.type,
+        issuedAt: certificate.issuedAt,
+        status: certificate.status,
+        finalText: certificate.finalText,
+        verificationUrl: certificate.verificationUrl,
       },
       message: isValid ? "Certificate is valid" : "Certificate is invalid",
     };
@@ -512,25 +750,27 @@ export class CertificateService {
       unionName: string;
       referenceNo: string;
       certificateNo: string;
-      applicantName: string;
+      applicantName: string | null;
       certificateType: string;
       issueDate?: string;
-      finalText: string;
-      qrCodeDataUrl?: string;
+      finalText: string | null;
+      qrCodeDataUrl?: string | null;
       signatureLabel?: string;
     };
     message: string;
   }> {
-    await connectDB();
-    if (!mongoose.Types.ObjectId.isValid(id)) {
+    if (!isValidObjectId(id)) {
       return { success: false, message: "Invalid certificate ID" };
     }
 
-    const certificate = await Certificate.findById(id).lean();
+    const certificate = await prisma.certificate.findUnique({
+      where: { id },
+    });
+
     if (!certificate) {
       return { success: false, message: "Certificate not found" };
     }
-    if (certificate.status !== CertificateStatus.APPROVED) {
+    if (certificate.status !== "APPROVED") {
       return { success: false, message: "Only approved certificates are print-ready" };
     }
 
@@ -542,7 +782,7 @@ export class CertificateService {
         certificateNo: certificate.certificateNo,
         applicantName: certificate.applicantName,
         certificateType: certificate.type,
-        issueDate: certificate.issueDate ? certificate.issueDate.toISOString() : undefined,
+        issueDate: certificate.issuedAt ? certificate.issuedAt.toISOString() : undefined,
         finalText: certificate.finalText,
         qrCodeDataUrl: certificate.qrCode,
         signatureLabel: "Chairman / Authorized Officer",
@@ -556,27 +796,34 @@ export class CertificateService {
     preview?: {
       certificateId: string;
       referenceNo: string;
-      finalText: string;
-      applicantName: string;
+      finalText: string | null;
+      applicantName: string | null;
       status: CertificateStatus;
       printCount: number;
-      lastPrintedAt?: Date;
+      lastPrintedAt?: Date | null;
     };
     message: string;
   }> {
-    await connectDB();
-    if (!mongoose.Types.ObjectId.isValid(id)) {
+    if (!isValidObjectId(id)) {
       return { success: false, message: "Invalid certificate ID" };
     }
 
-    const certificate = await Certificate.findById(id)
-      .select("referenceNo finalText applicantName status printCount lastPrintedAt")
-      .lean();
+    const certificate = await prisma.certificate.findUnique({
+      where: { id },
+      select: {
+        referenceNo: true,
+        finalText: true,
+        applicantName: true,
+        status: true,
+        printCount: true,
+        lastPrintedAt: true,
+      },
+    });
 
     if (!certificate) {
       return { success: false, message: "Certificate not found" };
     }
-    if (certificate.status !== CertificateStatus.APPROVED) {
+    if (certificate.status !== "APPROVED") {
       return { success: false, message: "Only approved certificates can be previewed for print" };
     }
 
@@ -588,7 +835,7 @@ export class CertificateService {
         finalText: certificate.finalText,
         applicantName: certificate.applicantName,
         status: certificate.status,
-        printCount: certificate.printCount || 0,
+        printCount: certificate.printCount,
         lastPrintedAt: certificate.lastPrintedAt,
       },
       message: "Print preview ready",
@@ -600,31 +847,46 @@ export class CertificateService {
     history?: Array<{
       printedAt: Date;
       printedBy?: string;
-      method: "PREVIEW" | "PRINT";
-      note?: string;
+      method: string;
+      note?: string | null;
     }>;
     message: string;
   }> {
-    await connectDB();
-    if (!mongoose.Types.ObjectId.isValid(id)) {
+    if (!isValidObjectId(id)) {
       return { success: false, message: "Invalid certificate ID" };
     }
 
-    const certificate = await Certificate.findById(id)
-      .populate("printHistory.printedBy", "name")
-      .select("printHistory")
-      .lean();
+    const certificate = await prisma.certificate.findUnique({
+      where: { id },
+      select: {
+        printHistory: true,
+      },
+    });
 
     if (!certificate) {
       return { success: false, message: "Certificate not found" };
     }
 
-    const history = (certificate.printHistory || []).map((entry: any) => ({
-      printedAt: entry.printedAt,
-      printedBy: entry.printedBy?.name,
-      method: entry.method as "PREVIEW" | "PRINT",
-      note: entry.note,
-    }));
+    // For each printHistory entry, fetch the user name if printedById exists
+    const history = await Promise.all(
+      (certificate.printHistory || []).map(async (entry) => {
+        let printedByName: string | undefined;
+        if (entry.printedById && isValidObjectId(entry.printedById)) {
+          const user = await prisma.user.findUnique({
+            where: { id: entry.printedById },
+            select: { name: true },
+          });
+          printedByName = user?.name;
+        }
+
+        return {
+          printedAt: entry.printedAt,
+          printedBy: printedByName,
+          method: entry.method || "PRINT",
+          note: entry.note,
+        };
+      })
+    );
 
     return {
       success: true,
@@ -639,86 +901,188 @@ export class CertificateService {
     method: "PREVIEW" | "PRINT" = "PRINT",
     note?: string
   ): Promise<{ success: boolean; message: string }> {
-    await connectDB();
-
-    const session = await mongoose.startSession();
-    session.startTransaction();
+    if (!isValidObjectId(id)) {
+      return { success: false, message: "Invalid certificate ID" };
+    }
 
     try {
-      if (!mongoose.Types.ObjectId.isValid(id)) {
-        await session.abortTransaction();
-        return { success: false, message: "Invalid certificate ID" };
-      }
-
-      const certificate = await Certificate.findById(id)
-        .select("citizen status printCount printHistory")
-        .session(session);
-
-      if (!certificate) {
-        await session.abortTransaction();
-        return { success: false, message: "Certificate not found" };
-      }
-      if (certificate.status !== CertificateStatus.APPROVED) {
-        await session.abortTransaction();
-        return { success: false, message: "Only approved certificates can be printed" };
-      }
-
-      const citizenId = certificate.citizen.toString();
-      const taxCheck = await HoldingTaxService.checkUnpaidTax(citizenId);
-      if (taxCheck.hasUnpaid) {
-        await session.abortTransaction();
-        return {
-          success: false,
-          message: "Print is blocked until all holding tax dues are cleared",
-        };
-      }
-
-      const historyEntry: {
-        printedAt: Date;
-        printedBy?: mongoose.Types.ObjectId;
-        method: "PREVIEW" | "PRINT";
-        note?: string;
-      } = {
-        printedAt: new Date(),
-        method,
-        note,
-      };
-
-      if (userId && mongoose.Types.ObjectId.isValid(userId)) {
-        historyEntry.printedBy = new mongoose.Types.ObjectId(userId);
-      }
-
-      certificate.printHistory = [...(certificate.printHistory || []), historyEntry];
-      if (method === "PRINT") {
-        certificate.printCount = (certificate.printCount || 0) + 1;
-        certificate.lastPrintedAt = new Date();
-      }
-
-      await certificate.save({ session });
-
-      // Log audit
-      if (userId) {
-        await AuditLog.log({
-          user: new mongoose.Types.ObjectId(userId),
-          action: AuditAction.PRINT,
-          entityType: EntityType.CERTIFICATE,
-          entityId: certificate._id,
-          description: `Certificate ${method.toLowerCase()}: ${certificate._id}`,
-          severity: Severity.LOW,
+      await prisma.$transaction(async (tx) => {
+        const certificate = await tx.certificate.findUnique({
+          where: { id },
+          select: {
+            id: true,
+            citizenId: true,
+            status: true,
+            printCount: true,
+            printHistory: true,
+          },
         });
-      }
 
-      await session.commitTransaction();
+        if (!certificate) {
+          throw new Error("Certificate not found");
+        }
+        if (certificate.status !== "APPROVED") {
+          throw new Error("Only approved certificates can be printed");
+        }
+
+        // Check for unpaid tax
+        const taxCheck = await HoldingTaxService.checkUnpaidTax(certificate.citizenId);
+        if (taxCheck.hasUnpaid) {
+          throw new Error("Print is blocked until all holding tax dues are cleared");
+        }
+
+        const historyEntry: PrintHistoryEntry = {
+          printedAt: new Date(),
+          printedById: userId && isValidObjectId(userId) ? userId : undefined,
+          method,
+          note,
+        };
+
+        const newHistory = [...(certificate.printHistory || []), historyEntry];
+        const updateData: Prisma.CertificateUpdateInput = {
+          printHistory: newHistory,
+        };
+
+        if (method === "PRINT") {
+          updateData.printCount = (certificate.printCount || 0) + 1;
+          updateData.lastPrintedAt = new Date();
+        }
+
+        await tx.certificate.updateMany({
+          where: { id },
+          data: updateData,
+        });
+
+        // Log audit
+        if (userId) {
+          await logAudit(tx, {
+            userId,
+            action: "PRINT",
+            entityType: "CERTIFICATE",
+            entityId: certificate.id,
+            description: `Certificate ${method.toLowerCase()}: ${certificate.id}`,
+            severity: "LOW",
+          });
+        }
+      });
 
       return {
         success: true,
         message: method === "PRINT" ? "Print recorded" : "Preview recorded",
       };
     } catch (error) {
-      await session.abortTransaction();
-      throw error;
-    } finally {
-      session.endSession();
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : "Failed to register print",
+      };
+    }
+  }
+
+  static async getByCitizenId(citizenId: string): Promise<CertificateWithRelations[]> {
+    if (!isValidObjectId(citizenId)) {
+      return [];
+    }
+
+    const certificates = await prisma.certificate.findMany({
+      where: { citizenId, deletedAt: null },
+      include: {
+        citizen: {
+          select: { id: true, name: true, nameBn: true, nid: true, fatherName: true },
+        },
+        template: {
+          select: { id: true, name: true, nameBn: true },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    return certificates;
+  }
+
+  static async getStats(): Promise<{
+    total: number;
+    byStatus: Record<string, number>;
+    byType: Record<string, number>;
+    thisMonth: number;
+  }> {
+    const [total, byStatus, byType, thisMonth] = await Promise.all([
+      prisma.certificate.count({ where: { deletedAt: null } }),
+      prisma.certificate.groupBy({
+        by: ["status"],
+        _count: true,
+        where: { deletedAt: null },
+      }),
+      prisma.certificate.groupBy({
+        by: ["type"],
+        _count: true,
+        where: { deletedAt: null },
+      }),
+      prisma.certificate.count({
+        where: {
+          deletedAt: null,
+          createdAt: {
+            gte: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
+          },
+        },
+      }),
+    ]);
+
+    return {
+      total,
+      byStatus: Object.fromEntries(byStatus.map((s) => [s.status, s._count])),
+      byType: Object.fromEntries(byType.map((t) => [t.type, t._count])),
+      thisMonth,
+    };
+  }
+
+  static async delete(id: string, deletedBy?: string): Promise<{ success: boolean; message: string }> {
+    if (!isValidObjectId(id)) {
+      return { success: false, message: "Invalid certificate ID" };
+    }
+
+    try {
+      await prisma.$transaction(async (tx) => {
+        const certificate = await tx.certificate.findUnique({
+          where: { id },
+        });
+
+        if (!certificate) {
+          throw new Error("Certificate not found");
+        }
+
+        if (certificate.status === "APPROVED") {
+          throw new Error("Cannot delete approved certificate");
+        }
+
+        // Soft delete
+        await tx.certificate.updateMany({
+          where: { id },
+          data: {
+            deletedAt: new Date(),
+            updatedById: deletedBy,
+          },
+        });
+
+        // Log audit
+        if (deletedBy && isValidObjectId(deletedBy)) {
+          await logAudit(tx, {
+            userId: deletedBy,
+            action: "SOFT_DELETE",
+            entityType: "CERTIFICATE",
+            entityId: certificate.id,
+            entityName: certificate.applicantName || undefined,
+            description: `Certificate deleted: ${certificate.certificateNo}`,
+            severity: "MEDIUM",
+          });
+        }
+      });
+
+      return { success: true, message: "Certificate deleted successfully" };
+    } catch (error) {
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : "Failed to delete certificate",
+      };
     }
   }
 }

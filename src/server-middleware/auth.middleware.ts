@@ -69,17 +69,17 @@ export function checkRole(...allowedRoles: Role[]): (handler: RouteHandler) => R
 }
 
 /**
- * Middleware to check if user is admin
+ * Middleware to check if user is admin (SECRETARY)
  */
 export function checkAdmin(handler: RouteHandler): RouteHandler {
-  return checkRole("SUPER_ADMIN", "ADMIN")(handler);
+  return checkRole("SECRETARY")(handler);
 }
 
 /**
- * Middleware to check if user is super admin
+ * Middleware to check if user is super admin (SECRETARY)
  */
 export function checkSuperAdmin(handler: RouteHandler): RouteHandler {
-  return checkRole("SUPER_ADMIN")(handler);
+  return checkRole("SECRETARY")(handler);
 }
 
 /**

@@ -1,12 +1,5 @@
-import { connectDB } from "@/lib/mongodb";
-import {
-  Beneficiary,
-  BeneficiaryStatus,
-  Certificate,
-  CertificateStatus,
-  HoldingTax,
-  PaymentStatus,
-} from "@/models";
+import { prisma } from "@/lib/db";
+import { CertificateStatus, BeneficiaryStatus, HoldingTaxPaymentStatus } from "@prisma/client";
 
 export interface NotificationAlertItem {
   id: string;
@@ -30,75 +23,82 @@ export interface NotificationSummary {
 
 export class NotificationService {
   static async getAlerts(limitPerType = 5): Promise<NotificationSummary> {
-    await connectDB();
-
-    const unpaidStatuses = [PaymentStatus.UNPAID, PaymentStatus.PARTIAL, PaymentStatus.OVERDUE];
+    const unpaidStatuses: HoldingTaxPaymentStatus[] = ["UNPAID", "PARTIAL", "OVERDUE"];
 
     const [taxUnpaidCount, pendingCertificateCount, pendingReliefCount, unpaidTaxes, pendingCertificates, pendingRelief] =
       await Promise.all([
-        HoldingTax.countDocuments({ status: { $in: unpaidStatuses }, deletedAt: null }),
-        Certificate.countDocuments({ status: CertificateStatus.SUBMITTED, deletedAt: null }),
-        Beneficiary.countDocuments({
-          status: BeneficiaryStatus.VERIFIED,
-          isLocked: { $ne: true },
-          deletedAt: null,
+        prisma.holdingTax.count({
+          where: { status: { in: unpaidStatuses }, deletedAt: null },
         }),
-        HoldingTax.find({ status: { $in: unpaidStatuses }, deletedAt: null })
-          .populate("citizen", "name nameBn")
-          .select("citizen holdingInfo balance dueDate referenceNo")
-          .sort({ dueDate: 1 })
-          .limit(limitPerType)
-          .lean(),
-        Certificate.find({ status: CertificateStatus.SUBMITTED, deletedAt: null })
-          .populate("citizen", "name nameBn")
-          .select("referenceNo applicantName createdAt citizen")
-          .sort({ createdAt: -1 })
-          .limit(limitPerType)
-          .lean(),
-        Beneficiary.find({
-          status: BeneficiaryStatus.VERIFIED,
-          isLocked: { $ne: true },
-          deletedAt: null,
-        })
-          .populate("citizen", "name nameBn")
-          .populate("program", "name nameBn")
-          .select("beneficiaryNo createdAt citizen program")
-          .sort({ createdAt: -1 })
-          .limit(limitPerType)
-          .lean(),
+        prisma.certificate.count({
+          where: { status: CertificateStatus.PENDING, deletedAt: null },
+        }),
+        prisma.beneficiary.count({
+          where: {
+            status: BeneficiaryStatus.VERIFIED,
+            isLocked: { not: true },
+            deletedAt: null,
+          },
+        }),
+        prisma.holdingTax.findMany({
+          where: { status: { in: unpaidStatuses }, deletedAt: null },
+          include: {
+            citizen: { select: { id: true, name: true, nameBn: true } },
+          },
+          orderBy: { dueDate: "asc" },
+          take: limitPerType,
+        }),
+        prisma.certificate.findMany({
+          where: { status: CertificateStatus.PENDING, deletedAt: null },
+          include: {
+            citizen: { select: { name: true, nameBn: true } },
+          },
+          orderBy: { createdAt: "desc" },
+          take: limitPerType,
+        }),
+        prisma.beneficiary.findMany({
+          where: {
+            status: BeneficiaryStatus.VERIFIED,
+            isLocked: { not: true },
+            deletedAt: null,
+          },
+          include: {
+            citizen: { select: { name: true, nameBn: true } },
+            program: { select: { name: true, nameBn: true } },
+          },
+          orderBy: { createdAt: "desc" },
+          take: limitPerType,
+        }),
       ]);
 
     const taxAlerts: NotificationAlertItem[] = unpaidTaxes.map((tax) => {
-      const citizen = tax.citizen as unknown as { _id: { toString: () => string }; name?: string; nameBn?: string };
-      const citizenName = citizen?.nameBn || citizen?.name || "Citizen";
+      const citizenName = tax.citizen?.nameBn || tax.citizen?.name || "Citizen";
       return {
-        id: `tax-${tax._id.toString()}`,
+        id: `tax-${tax.id}`,
         kind: "TAX_UNPAID",
         title: "Unpaid holding tax",
         message: `${citizenName} (${tax.holdingInfo.holdingNo}) due ৳${tax.balance}`,
         severity: "warning",
         createdAt: tax.dueDate ? new Date(tax.dueDate).toISOString() : new Date().toISOString(),
-        link: `/dashboard/citizens/${citizen?._id?.toString?.() || ""}`,
+        link: `/dashboard/citizens/${tax.citizen?.id || ""}`,
       };
     });
 
     const certificateAlerts: NotificationAlertItem[] = pendingCertificates.map((certificate) => ({
-      id: `cert-${certificate._id.toString()}`,
+      id: `cert-${certificate.id}`,
       kind: "PENDING_APPROVAL",
       title: "Certificate pending approval",
-      message: `${certificate.applicantName} (${certificate.referenceNo})`,
+      message: `${certificate.applicantName || certificate.citizen?.name || "Applicant"} (${certificate.referenceNo})`,
       severity: "info",
       createdAt: new Date(certificate.createdAt).toISOString(),
       link: "/dashboard/certificates/approvals",
     }));
 
     const reliefAlerts: NotificationAlertItem[] = pendingRelief.map((item) => {
-      const citizen = item.citizen as unknown as { name?: string; nameBn?: string };
-      const program = item.program as unknown as { name?: string; nameBn?: string };
-      const citizenName = citizen?.nameBn || citizen?.name || "Citizen";
-      const programName = program?.nameBn || program?.name || "Relief program";
+      const citizenName = item.citizen?.nameBn || item.citizen?.name || "Citizen";
+      const programName = item.program?.nameBn || item.program?.name || "Relief program";
       return {
-        id: `relief-${item._id.toString()}`,
+        id: `relief-${item.id}`,
         kind: "PENDING_APPROVAL",
         title: "Relief pending approval",
         message: `${citizenName} - ${programName}`,
@@ -123,4 +123,3 @@ export class NotificationService {
     };
   }
 }
-

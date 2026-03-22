@@ -7,12 +7,13 @@ export interface User {
   phone?: string;
   role: Role;
   status: Status;
+  citizenId?: string; // For CITIZEN role users
   lastLoginAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
 
-export type Role = "SUPER_ADMIN" | "ADMIN" | "OPERATOR" | "VIEWER";
+export type Role = "SECRETARY" | "ENTREPRENEUR" | "CITIZEN";
 export type Status = "ACTIVE" | "INACTIVE" | "SUSPENDED";
 
 export interface LoginRequest {

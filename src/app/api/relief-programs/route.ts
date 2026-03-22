@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ReliefService } from "@/services";
-import { FundingSource, ReliefType } from "@/models";
+import { FundingSource, ReliefType } from "@prisma/client";
 import { getTokenFromHeader, verifyToken } from "@/lib/auth";
 
 async function resolveUserId(request: NextRequest): Promise<string | undefined> {
@@ -118,4 +118,3 @@ export async function POST(request: NextRequest) {
     );
   }
 }
-

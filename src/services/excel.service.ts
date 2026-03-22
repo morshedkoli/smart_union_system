@@ -1,6 +1,6 @@
 import * as XLSX from "xlsx";
 import { CitizenService, FinanceService } from "@/services";
-import { Gender, MaritalStatus } from "@/models";
+import { Gender, MaritalStatus } from "@prisma/client";
 
 interface CitizenExcelRow {
   name?: string;

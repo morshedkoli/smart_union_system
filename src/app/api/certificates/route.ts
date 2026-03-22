@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { CertificateService } from "@/services";
-import { CertificateStatus, CertificateType } from "@/models";
+import { CertificateStatus, CertificateType } from "@prisma/client";
 import { verifyToken, getTokenFromHeader } from "@/lib/auth";
 
 async function resolveUserId(request: NextRequest): Promise<string | undefined> {
@@ -81,4 +81,3 @@ export async function POST(request: NextRequest) {
     );
   }
 }
-

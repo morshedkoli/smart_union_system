@@ -3,79 +3,181 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "mongodb"
   url      = env("DATABASE_URL")
 }
 
-// User and Authentication
-model User {
-  id            String    @id @default(cuid())
-  email         String    @unique
-  password      String
-  name          String
-  nameEn        String?
-  nameBn        String?
-  phone         String?
-  role          Role      @default(OPERATOR)
-  status        Status    @default(ACTIVE)
-  lastLoginAt   DateTime?
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-  deletedAt     DateTime?
+// ================================
+// COMPOSITE TYPES (Embedded Documents)
+// ================================
 
-  auditLogs     AuditLog[]
-  certificates  Certificate[] @relation("IssuedBy")
-
-  @@map("users")
+type Address {
+  village     String?
+  ward        Int
+  postOffice  String?
+  postCode    String?
+  upazila     String?
+  district    String?
+  division    String?
+  fullAddress String?
 }
 
+type TemplateFieldValidation {
+  minLength Int?
+  maxLength Int?
+  min       Float?
+  max       Float?
+  pattern   String?
+}
+
+type TemplateField {
+  name         String
+  label        String
+  labelBn      String?
+  type         String
+  required     Boolean                  @default(false)
+  placeholder  String?
+  options      String[]
+  validation   TemplateFieldValidation?
+  defaultValue String?
+  order        Int                      @default(0)
+}
+
+type EligibilityCriteria {
+  minAge           Int?
+  maxAge           Int?
+  genders          String[]
+  maritalStatuses  String[]
+  maxIncome        Float?
+  wards            Int[]
+  isFreedomFighter Boolean?
+  isDisabled       Boolean?
+  isWidow          Boolean?
+  isOrphan         Boolean?
+  customCriteria   String?
+}
+
+type Budget {
+  totalBudget        Float
+  allocatedBudget    Float  @default(0)
+  disbursedAmount    Float  @default(0)
+  remainingAmount    Float  @default(0)
+  costPerBeneficiary Float?
+  currency           String @default("BDT")
+}
+
+type DistributedItem {
+  name     String
+  quantity Float
+  unit     String
+}
+
+type Distribution {
+  distributionNo     String
+  scheduledDate      DateTime
+  distributedDate    DateTime?
+  status             String    @default("PENDING")
+  amount             Float?
+  items              DistributedItem[]
+  collectedBy        String?
+  collectorNid       String?
+  collectorRelation  String?
+  collectorSignature String?
+  distributedById    String?
+  receiptNo          String?
+  remarks            String?
+  photo              String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @default(now())
+}
+
+type BankAccount {
+  bankName    String?
+  branchName  String?
+  accountNo   String?
+  accountName String?
+}
+
+type MobileBanking {
+  provider  String?
+  accountNo String?
+}
+
+type HoldingInfo {
+  holdingNo    String
+  mouza        String?
+  jlNo         String?
+  daagNo       String?
+  khatianNo    String?
+  plotNo       String?
+  ward         Int
+  area         Float
+  areaUnit     String  @default("decimal")
+  holdingType  String
+  buildingType String?
+  floors       Int?
+  rooms        Int?
+  yearBuilt    Int?
+}
+
+type TaxAssessment {
+  assessedValue  Float
+  taxRate        Float
+  annualTax      Float
+  assessmentDate DateTime @default(now())
+  assessedById   String?
+  notes          String?
+}
+
+type TaxPayment {
+  receiptNo     String
+  amount        Float
+  paymentDate   DateTime @default(now())
+  paymentMethod String
+  transactionId String?
+  bankName      String?
+  chequeNo      String?
+  collectedById String
+  notes         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @default(now())
+}
+
+type CertificateMetadata {
+  birthPlace       String?
+  birthTime        String?
+  birthOrder       Int?
+  hospitalName     String?
+  attendantName    String?
+  deathDate        DateTime?
+  deathPlace       String?
+  causeOfDeath     String?
+  informantName    String?
+  informantRelation String?
+  customFields     Json?
+}
+
+type PrintHistoryEntry {
+  printedAt   DateTime @default(now())
+  printedById String?
+  method      String?
+  note        String?
+}
+
+// ================================
+// ENUMS
+// ================================
+
 enum Role {
-  SUPER_ADMIN
-  ADMIN
-  OPERATOR
-  VIEWER
+  SECRETARY    // Previously SUPER_ADMIN - Secretary role with full access
+  ENTREPRENEUR // Previously OPERATOR - Can add citizens, apply for certificates
+  CITIZEN      // New role - Citizens who can login, apply for certificates, view their data
 }
 
 enum Status {
   ACTIVE
   INACTIVE
   SUSPENDED
-}
-
-// Citizens
-model Citizen {
-  id              String    @id @default(cuid())
-  nid             String?   @unique
-  birthCertNo     String?   @unique
-  name            String
-  nameEn          String?
-  nameBn          String
-  fatherName      String
-  fatherNameBn    String?
-  motherName      String
-  motherNameBn    String?
-  dateOfBirth     DateTime
-  gender          Gender
-  religion        String?
-  maritalStatus   MaritalStatus @default(SINGLE)
-  occupation      String?
-  phone           String?
-  email           String?
-  presentAddress  String
-  permanentAddress String
-  wardNo          Int
-  holdingNo       String?
-  photo           String?
-  status          Status    @default(ACTIVE)
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
-  deletedAt       DateTime?
-
-  certificates    Certificate[]
-  taxes           Tax[]
-  holdings        Holding[]
-
-  @@map("citizens")
 }
 
 enum Gender {
@@ -91,56 +193,22 @@ enum MaritalStatus {
   WIDOWED
 }
 
-// Holdings for Tax
-model Holding {
-  id              String    @id @default(cuid())
-  holdingNo       String    @unique
-  citizenId       String
-  citizen         Citizen   @relation(fields: [citizenId], references: [id])
-  wardNo          Int
-  mouza           String?
-  jlNo            String?
-  plot            String?
-  area            Float?
-  landType        String?
-  buildingType    String?
-  assessedValue   Float     @default(0)
-  annualTax       Float     @default(0)
-  status          Status    @default(ACTIVE)
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
-  deletedAt       DateTime?
-
-  taxes           Tax[]
-
-  @@map("holdings")
+enum BloodGroup {
+  A_POSITIVE
+  A_NEGATIVE
+  B_POSITIVE
+  B_NEGATIVE
+  O_POSITIVE
+  O_NEGATIVE
+  AB_POSITIVE
+  AB_NEGATIVE
 }
 
-// Certificates
-model Certificate {
-  id              String          @id @default(cuid())
-  certificateNo   String          @unique
-  type            CertificateType
-  citizenId       String
-  citizen         Citizen         @relation(fields: [citizenId], references: [id])
-  issuedById      String
-  issuedBy        User            @relation("IssuedBy", fields: [issuedById], references: [id])
-  issuedAt        DateTime        @default(now())
-  validUntil      DateTime?
-  status          CertificateStatus @default(PENDING)
-  approvedAt      DateTime?
-  approvedById    String?
-  rejectedAt      DateTime?
-  rejectionReason String?
-  qrCode          String?
-  metadata        String?         // JSON string for additional data
-  createdAt       DateTime        @default(now())
-  updatedAt       DateTime        @updatedAt
-  deletedAt       DateTime?
-
-  @@index([certificateNo])
-  @@index([citizenId])
-  @@map("certificates")
+enum CitizenStatus {
+  ACTIVE
+  INACTIVE
+  DECEASED
+  MIGRATED
 }
 
 enum CertificateType {
@@ -160,44 +228,70 @@ enum CertificateStatus {
   REVOKED
 }
 
-// Taxes and Revenue
-model Tax {
-  id              String    @id @default(cuid())
-  receiptNo       String    @unique
-  type            TaxType
-  citizenId       String
-  citizen         Citizen   @relation(fields: [citizenId], references: [id])
-  holdingId       String?
-  holding         Holding?  @relation(fields: [holdingId], references: [id])
-  fiscalYear      String
-  amount          Float
-  arrears         Float     @default(0)
-  penalty         Float     @default(0)
-  totalAmount     Float
-  paidAmount      Float     @default(0)
-  dueDate         DateTime
-  paidAt          DateTime?
-  status          PaymentStatus @default(UNPAID)
-  paymentMethod   String?
-  transactionId   String?
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
-  deletedAt       DateTime?
-
-  @@index([receiptNo])
-  @@index([citizenId])
-  @@map("taxes")
+enum TemplateStatus {
+  ACTIVE
+  INACTIVE
+  DRAFT
 }
 
-enum TaxType {
-  HOLDING_TAX
-  TRADE_LICENSE_FEE
-  BIRTH_CERTIFICATE_FEE
-  DEATH_CERTIFICATE_FEE
-  OTHER_FEE
+enum ReliefType {
+  FOOD
+  CASH
+  HOUSING
+  MEDICAL
+  EDUCATION
+  AGRICULTURAL
+  LIVELIHOOD
+  DISASTER
+  OTHER
 }
 
-enum PaymentStatus {
+enum ProgramStatus {
+  DRAFT
+  PLANNED
+  ACTIVE
+  PAUSED
+  COMPLETED
+  CANCELLED
+}
+
+enum FundingSource {
+  GOVERNMENT
+  NGO
+  PRIVATE_DONATION
+  FOREIGN_AID
+  LOCAL_FUND
+  MIXED
+}
+
+enum BeneficiaryStatus {
+  PENDING
+  VERIFIED
+  APPROVED
+  REJECTED
+  ACTIVE
+  SUSPENDED
+  COMPLETED
+  WITHDRAWN
+}
+
+enum HoldingType {
+  RESIDENTIAL
+  COMMERCIAL
+  AGRICULTURAL
+  MIXED
+  VACANT
+}
+
+enum BuildingType {
+  PUCCA
+  SEMI_PUCCA
+  KUTCHA
+  TIN_SHED
+  MULTI_STOREY
+}
+
+enum HoldingTaxPaymentStatus {
   UNPAID
   PARTIAL
   PAID
@@ -205,60 +299,576 @@ enum PaymentStatus {
   WAIVED
 }
 
-// Audit Log
+enum TransactionType {
+  INCOME
+  EXPENSE
+}
+
+enum TransactionCategory {
+  // Income
+  HOLDING_TAX
+  TRADE_LICENSE_FEE
+  CERTIFICATE_FEE
+  MARKET_RENT
+  LEASE_RENT
+  FINE_PENALTY
+  GRANT_GOVERNMENT
+  GRANT_NGO
+  DONATION
+  OTHER_INCOME
+  // Expense
+  SALARY
+  ALLOWANCE
+  OFFICE_EXPENSE
+  STATIONERY
+  ELECTRICITY
+  WATER
+  TELEPHONE
+  INTERNET
+  MAINTENANCE
+  CONSTRUCTION
+  DEVELOPMENT
+  RELIEF_DISTRIBUTION
+  TRAVEL
+  TRAINING
+  MEETING
+  ENTERTAINMENT
+  MISCELLANEOUS
+  OTHER_EXPENSE
+}
+
+enum PaymentMode {
+  CASH
+  BANK_TRANSFER
+  CHEQUE
+  MOBILE_BANKING
+  ONLINE
+}
+
+enum EntryStatus {
+  DRAFT
+  PENDING
+  APPROVED
+  REJECTED
+  VOID
+}
+
+enum NotificationType {
+  INFO
+  SUCCESS
+  WARNING
+  ERROR
+  ALERT
+}
+
+enum NotificationCategory {
+  SYSTEM
+  CERTIFICATE
+  TAX
+  RELIEF
+  PAYMENT
+  REMINDER
+  ANNOUNCEMENT
+  APPROVAL
+  TASK
+}
+
+enum NotificationChannel {
+  IN_APP
+  EMAIL
+  SMS
+  PUSH
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  DELIVERED
+  READ
+  FAILED
+  ARCHIVED
+}
+
+enum PaymentMethod {
+  CASH
+  BANK
+  MOBILE_BANKING
+  ONLINE
+  CHEQUE
+}
+
+enum DistributionStatus {
+  PENDING
+  SCHEDULED
+  DISTRIBUTED
+  PARTIAL
+  FAILED
+  RETURNED
+}
+
+// ================================
+// MODELS
+// ================================
+
+model User {
+  id                String    @id @default(auto()) @map("_id") @db.ObjectId
+  email             String    @unique
+  password          String
+  name              String
+  nameEn            String?
+  nameBn            String?
+  phone             String?
+  role              Role      @default(ENTREPRENEUR)
+  status            Status    @default(ACTIVE)
+  lastLoginAt       DateTime?
+  lastLoginIp       String?
+  passwordChangedAt DateTime?
+  citizenId         String?   @unique @db.ObjectId // Link to Citizen for CITIZEN role users
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  deletedAt         DateTime?
+
+  // Relations
+  citizen              Citizen?            @relation(fields: [citizenId], references: [id])
+  auditLogs            AuditLog[]
+  certificatesIssued   Certificate[]       @relation("IssuedBy")
+  certificatesApproved Certificate[]       @relation("ApprovedBy")
+  notificationsSent    Notification[]      @relation("NotificationSender")
+
+  @@map("users")
+}
+
+model Citizen {
+  id                 String        @id @default(auto()) @map("_id") @db.ObjectId
+  registrationNo     String        @unique
+  nid                String?       @unique
+  birthCertificateNo String?       @unique
+  passportNo         String?       @unique
+  name               String
+  nameEn             String?
+  nameBn             String
+  fatherName         String
+  fatherNameBn       String?
+  fatherNid          String?
+  motherName         String
+  motherNameBn       String?
+  motherNid          String?
+  spouseName         String?
+  spouseNid          String?
+  dateOfBirth        DateTime
+  gender             Gender
+  bloodGroup         BloodGroup?
+  religion           String?
+  maritalStatus      MaritalStatus @default(SINGLE)
+  nationality        String        @default("Bangladeshi")
+  occupation         String?
+  education          String?
+  income             Float?
+  mobile             String?
+  email              String?
+  photo              String?
+  signature          String?
+  presentAddress     Address
+  permanentAddress   Address
+  holdingNo          String?
+  voterNo            String?
+  isFreedomFighter   Boolean       @default(false)
+  isDisabled         Boolean       @default(false)
+  disabilityType     String?
+  isWidow            Boolean       @default(false)
+  isOrphan           Boolean       @default(false)
+  familyMembersCount Int?
+  status             CitizenStatus @default(ACTIVE)
+  verifiedAt         DateTime?
+  verifiedById       String?       @db.ObjectId
+  unionParishadId    String?       @db.ObjectId
+  metadata           Json?
+  createdById        String?       @db.ObjectId
+  updatedById        String?       @db.ObjectId
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+  deletedAt          DateTime?
+
+  // Relations
+  user         User?         @relation // One-to-one relation with User for citizen login accounts
+  certificates Certificate[]
+  holdingTaxes HoldingTax[]
+  beneficiaries Beneficiary[]
+
+  @@index([mobile])
+  @@index([status])
+  @@index([holdingNo])
+  @@map("citizens")
+}
+
+model CertificateTemplate {
+  id              String          @id @default(auto()) @map("_id") @db.ObjectId
+  name            String
+  nameEn          String
+  nameBn          String
+  certificateType CertificateType
+  description     String?
+  version         Int             @default(1)
+  status          TemplateStatus  @default(DRAFT)
+  fee             Float           @default(0)
+  validityDays    Int?
+  headerHtml      String?
+  bodyHtml        String
+  footerHtml      String?
+  stylesCss       String?
+  fields          TemplateField[]
+  placeholders    String[]
+  paperSize       String          @default("A4")
+  orientation     String          @default("portrait")
+  marginTop       Float           @default(20)
+  marginBottom    Float           @default(20)
+  marginLeft      Float           @default(20)
+  marginRight     Float           @default(20)
+  showQrCode      Boolean         @default(true)
+  qrPosition      String          @default("bottom-right")
+  showLogo        Boolean         @default(true)
+  showSeal        Boolean         @default(true)
+  showWatermark   Boolean         @default(false)
+  watermarkText   String?
+  showBorder      Boolean         @default(true)
+  borderStyle     String?
+  isDefault       Boolean         @default(false)
+  unionParishadId String?         @db.ObjectId
+  createdById     String?         @db.ObjectId
+  updatedById     String?         @db.ObjectId
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  deletedAt       DateTime?
+
+  certificates Certificate[]
+
+  @@index([certificateType])
+  @@index([status])
+  @@index([isDefault])
+  @@map("certificate_templates")
+}
+
+model Certificate {
+  id              String              @id @default(auto()) @map("_id") @db.ObjectId
+  certificateNo   String              @unique
+  referenceNo     String              @unique
+  type            CertificateType
+  citizenId       String              @db.ObjectId
+  citizen         Citizen             @relation(fields: [citizenId], references: [id])
+  templateId      String?             @db.ObjectId
+  template        CertificateTemplate? @relation(fields: [templateId], references: [id])
+  applicantName   String?
+  applicantNameBn String?
+  issuedById      String              @db.ObjectId
+  issuedBy        User                @relation("IssuedBy", fields: [issuedById], references: [id])
+  issuedAt        DateTime            @default(now())
+  validUntil      DateTime?
+  status          CertificateStatus   @default(PENDING)
+  approvedAt      DateTime?
+  approvedById    String?             @db.ObjectId
+  approvedBy      User?               @relation("ApprovedBy", fields: [approvedById], references: [id])
+  rejectedAt      DateTime?
+  rejectionReason String?
+  qrCode          String?
+  verificationUrl String?
+  finalText       String?
+  metadata        CertificateMetadata?
+  printCount      Int                 @default(0)
+  lastPrintedAt   DateTime?
+  printHistory    PrintHistoryEntry[]
+  fee             Float               @default(0)
+  feeStatus       String              @default("UNPAID")
+  unionParishadId String?             @db.ObjectId
+  createdById     String?             @db.ObjectId
+  updatedById     String?             @db.ObjectId
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+  deletedAt       DateTime?
+
+  @@index([citizenId])
+  @@index([type])
+  @@index([status])
+  @@map("certificates")
+}
+
+model HoldingTax {
+  id               String                 @id @default(auto()) @map("_id") @db.ObjectId
+  referenceNo      String                 @unique
+  citizenId        String                 @db.ObjectId
+  citizen          Citizen                @relation(fields: [citizenId], references: [id])
+  holdingInfo      HoldingInfo
+  fiscalYear       String
+  assessment       TaxAssessment
+  arrears          Float                  @default(0)
+  rebate           Float                  @default(0)
+  penalty          Float                  @default(0)
+  totalDue         Float
+  totalPaid        Float                  @default(0)
+  balance          Float
+  dueDate          DateTime
+  status           HoldingTaxPaymentStatus @default(UNPAID)
+  payments         TaxPayment[]
+  lastPaymentDate  DateTime?
+  demandNoticeDate DateTime?
+  demandNoticeSent Boolean                @default(false)
+  unionParishadId  String?                @db.ObjectId
+  createdById      String?                @db.ObjectId
+  updatedById      String?                @db.ObjectId
+  createdAt        DateTime               @default(now())
+  updatedAt        DateTime               @updatedAt
+  deletedAt        DateTime?
+
+  @@index([citizenId])
+  @@index([fiscalYear])
+  @@index([status])
+  @@index([dueDate])
+  @@map("holding_taxes")
+}
+
+model ReliefProgram {
+  id                   String              @id @default(auto()) @map("_id") @db.ObjectId
+  programCode          String              @unique
+  name                 String
+  nameEn               String
+  nameBn               String
+  description          String?
+  type                 ReliefType
+  category             String?
+  status               ProgramStatus       @default(DRAFT)
+  fundingSource        FundingSource
+  fundingAgency        String?
+  startDate            DateTime
+  endDate              DateTime?
+  eligibilityCriteria  EligibilityCriteria?
+  budget               Budget
+  targetBeneficiaries  Int
+  currentBeneficiaries Int                 @default(0)
+  distributionSchedule String?
+  distributionMethod   String?
+  itemsDistributed     DistributedItem[]
+  documents            String[]
+  contactPerson        String?
+  contactPhone         String?
+  unionParishadId      String?             @db.ObjectId
+  createdById          String?             @db.ObjectId
+  updatedById          String?             @db.ObjectId
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+  deletedAt            DateTime?
+
+  beneficiaries Beneficiary[]
+
+  @@index([type])
+  @@index([status])
+  @@index([startDate])
+  @@map("relief_programs")
+}
+
+model Beneficiary {
+  id                   String            @id @default(auto()) @map("_id") @db.ObjectId
+  beneficiaryNo        String            @unique
+  programId            String            @db.ObjectId
+  program              ReliefProgram     @relation(fields: [programId], references: [id])
+  citizenId            String            @db.ObjectId
+  citizen              Citizen           @relation(fields: [citizenId], references: [id])
+  applicationDate      DateTime          @default(now())
+  status               BeneficiaryStatus @default(PENDING)
+  priorityScore        Int?
+  priorityReason       String?
+  verifiedAt           DateTime?
+  verifiedById         String?           @db.ObjectId
+  approvedAt           DateTime?
+  approvedById         String?           @db.ObjectId
+  rejectedAt           DateTime?
+  rejectedById         String?           @db.ObjectId
+  rejectionReason      String?
+  totalEntitlement     Float
+  totalReceived        Float             @default(0)
+  remainingEntitlement Float             @default(0)
+  distributions        Distribution[]
+  lastDistributionDate DateTime?
+  nextDistributionDate DateTime?
+  bankAccount          BankAccount?
+  mobileBanking        MobileBanking?
+  nomineeNid           String?
+  nomineeName          String?
+  nomineeRelation      String?
+  nomineePhone         String?
+  documents            String[]
+  notes                String?
+  isLocked             Boolean           @default(false)
+  lockedAt             DateTime?
+  unionParishadId      String?           @db.ObjectId
+  createdById          String?           @db.ObjectId
+  updatedById          String?           @db.ObjectId
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+  deletedAt            DateTime?
+
+  @@unique([programId, citizenId])
+  @@index([programId])
+  @@index([citizenId])
+  @@index([status])
+  @@index([priorityScore(sort: Desc)])
+  @@map("beneficiaries")
+}
+
+model Cashbook {
+  id              String              @id @default(auto()) @map("_id") @db.ObjectId
+  entryNo         String              @unique
+  voucherNo       String
+  transactionDate DateTime
+  transactionType TransactionType
+  category        TransactionCategory
+  subCategory     String?
+  description     String
+  descriptionBn   String?
+  amount          Float
+  paymentMode     PaymentMode
+  referenceNo     String?
+  referenceType   String?
+  referenceId     String?             @db.ObjectId
+  paidTo          String?
+  receivedFrom    String?
+  bankName        String?
+  bankAccount     String?
+  chequeNo        String?
+  chequeDate      DateTime?
+  transactionId   String?
+  fiscalYear      String
+  budgetHead      String?
+  projectCode     String?
+  openingBalance  Float               @default(0)
+  closingBalance  Float
+  status          EntryStatus         @default(PENDING)
+  attachments     String[]
+  remarks         String?
+  approvedAt      DateTime?
+  approvedById    String?             @db.ObjectId
+  rejectedAt      DateTime?
+  rejectedById    String?             @db.ObjectId
+  rejectionReason String?
+  voidedAt        DateTime?
+  voidedById      String?             @db.ObjectId
+  voidReason      String?
+  unionParishadId String?             @db.ObjectId
+  createdById     String?             @db.ObjectId
+  updatedById     String?             @db.ObjectId
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+  deletedAt       DateTime?
+
+  @@index([fiscalYear])
+  @@index([transactionType])
+  @@index([category])
+  @@index([transactionDate(sort: Desc)])
+  @@index([status])
+  @@map("cashbooks")
+}
+
+model Notification {
+  id             String               @id @default(auto()) @map("_id") @db.ObjectId
+  recipientId    String               @db.ObjectId
+  recipientType  String               @default("user")
+  recipientEmail String?
+  recipientPhone String?
+  senderId       String?              @db.ObjectId
+  sender         User?                @relation("NotificationSender", fields: [senderId], references: [id])
+  type           NotificationType     @default(INFO)
+  category       NotificationCategory @default(SYSTEM)
+  channel        NotificationChannel  @default(IN_APP)
+  title          String
+  titleBn        String?
+  message        String
+  messageBn      String?
+  link           String?
+  linkText       String?
+  icon           String?
+  image          String?
+  data           Json?
+  entityType     String?
+  entityId       String?              @db.ObjectId
+  priority       Int                  @default(0)
+  status         NotificationStatus   @default(PENDING)
+  sentAt         DateTime?
+  deliveredAt    DateTime?
+  readAt         DateTime?
+  failedAt       DateTime?
+  failureReason  String?
+  retryCount     Int                  @default(0)
+  maxRetries     Int                  @default(3)
+  scheduledFor   DateTime?
+  expiresAt      DateTime?
+  isArchived     Boolean              @default(false)
+  unionParishadId String?             @db.ObjectId
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+  deletedAt      DateTime?
+
+  @@index([recipientId])
+  @@index([status])
+  @@index([priority(sort: Desc)])
+  @@index([expiresAt])
+  @@index([isArchived])
+  @@map("notifications")
+}
+
 model AuditLog {
-  id          String    @id @default(cuid())
-  userId      String
-  user        User      @relation(fields: [userId], references: [id])
-  action      String
-  entityType  String
-  entityId    String
-  oldValue    String?
-  newValue    String?
-  ipAddress   String?
-  userAgent   String?
-  createdAt   DateTime  @default(now())
+  id         String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId     String   @db.ObjectId
+  user       User     @relation(fields: [userId], references: [id])
+  action     String
+  entityType String
+  entityId   String
+  entityName String?
+  oldValue   Json?
+  newValue   Json?
+  changes    Json?
+  ipAddress  String?
+  userAgent  String?
+  severity   String   @default("LOW")
+  description String?
+  createdAt  DateTime @default(now())
 
   @@index([userId])
   @@index([entityType, entityId])
+  @@index([action])
+  @@index([createdAt(sort: Desc)])
   @@map("audit_logs")
 }
 
-// Settings
 model Setting {
-  id          String    @id @default(cuid())
-  key         String    @unique
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  key         String   @unique
   value       String
-  type        String    @default("string")
+  type        String   @default("string")
   description String?
-  updatedAt   DateTime  @updatedAt
+  updatedAt   DateTime @updatedAt
 
   @@map("settings")
 }
 
-// Union Parishad Info
 model UnionParishad {
-  id              String    @id @default(cuid())
-  code            String    @unique
-  nameEn          String
-  nameBn          String
-  district        String
-  upazila         String
-  division        String
-  chairman        String?
-  chairmanPhone   String?
-  totalWards      Int       @default(9)
-  logo            String?
-  seal            String?
-  signatureChairman String?
+  id                 String   @id @default(auto()) @map("_id") @db.ObjectId
+  code               String   @unique
+  nameEn             String
+  nameBn             String
+  district           String
+  upazila            String
+  division           String
+  chairman           String?
+  chairmanPhone      String?
+  totalWards         Int      @default(9)
+  logo               String?
+  seal               String?
+  signatureChairman  String?
   signatureSecretary String?
-  address         String?
-  phone           String?
-  email           String?
-  website         String?
-
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  address            String?
+  phone              String?
+  email              String?
+  website            String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
 
   @@map("union_parishads")
 }

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { EntryStatus, PaymentMode, TransactionCategory, TransactionType } from "@/models";
+import { EntryStatus, PaymentMode, TransactionCategory, TransactionType } from "@prisma/client";
 import { FinanceService } from "@/services";
 import { getTokenFromHeader, verifyToken } from "@/lib/auth";
 
@@ -130,4 +130,3 @@ export async function POST(request: NextRequest) {
     );
   }
 }
-

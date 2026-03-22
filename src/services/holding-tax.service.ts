@@ -1,15 +1,30 @@
-import { connectDB } from "@/lib/mongodb";
+import { prisma, type PrismaTransactionClient } from "@/lib/db";
 import {
+  generateHoldingTaxReferenceNo,
+  generateReceiptNo,
+  isValidObjectId,
+  getCurrentFiscalYear,
+} from "@/lib/prisma-utils";
+import {
+  calculateHoldingTaxBalance,
+  determinePaymentStatus,
+} from "@/lib/prisma-virtuals";
+import { deepSanitize } from "@/lib/sanitize";
+import type {
   HoldingTax,
-  IHoldingTax,
-  PaymentStatus,
+  Citizen,
+  HoldingTaxPaymentStatus,
   PaymentMethod,
+  Prisma,
+} from "@prisma/client";
+
+// Re-export enum values for backward compatibility
+export {
+  HoldingTaxPaymentStatus as PaymentStatus,
   HoldingType,
   BuildingType,
-} from "@/models";
-import { AuditLog, AuditAction, EntityType, Severity } from "@/models/AuditLog";
-import mongoose from "mongoose";
-import { deepSanitize } from "@/lib/sanitize";
+  PaymentMethod,
+} from "@prisma/client";
 
 export interface HoldingTaxCreateData {
   citizenId: string;
@@ -18,13 +33,16 @@ export interface HoldingTaxCreateData {
     mouza?: string;
     jlNo?: string;
     daagNo?: string;
+    khatianNo?: string;
     plotNo?: string;
     ward: number;
     area: number;
     areaUnit?: string;
-    holdingType: HoldingType;
-    buildingType?: BuildingType;
+    holdingType: string;
+    buildingType?: string;
     floors?: number;
+    rooms?: number;
+    yearBuilt?: number;
   };
   fiscalYear: string;
   assessment: {
@@ -34,6 +52,7 @@ export interface HoldingTaxCreateData {
   };
   arrears?: number;
   rebate?: number;
+  penalty?: number;
   dueDate: Date;
 }
 
@@ -46,224 +65,344 @@ export interface PaymentData {
   notes?: string;
 }
 
+// Interface for HoldingTax with related Citizen
+export interface HoldingTaxWithCitizen extends HoldingTax {
+  citizen?: {
+    id: string;
+    name: string;
+    nameBn: string;
+    nid?: string | null;
+    mobile?: string | null;
+  };
+}
+
 const SYSTEM_COLLECTOR_ID = "000000000000000000000001";
 
-function getCollectorObjectId(collectedBy?: string): mongoose.Types.ObjectId {
-  if (collectedBy && mongoose.Types.ObjectId.isValid(collectedBy)) {
-    return new mongoose.Types.ObjectId(collectedBy);
+function getCollectorId(collectedBy?: string): string {
+  if (collectedBy && isValidObjectId(collectedBy)) {
+    return collectedBy;
   }
-  return new mongoose.Types.ObjectId(SYSTEM_COLLECTOR_ID);
+  return SYSTEM_COLLECTOR_ID;
+}
+
+async function logAudit(
+  tx: PrismaTransactionClient,
+  data: {
+    userId: string;
+    action: string;
+    entityType: string;
+    entityId: string;
+    entityName?: string;
+    description?: string;
+    severity?: string;
+    changes?: object;
+  }
+): Promise<void> {
+  try {
+    if (isValidObjectId(data.userId)) {
+      await tx.auditLog.create({
+        data: {
+          userId: data.userId,
+          action: data.action,
+          entityType: data.entityType,
+          entityId: data.entityId,
+          entityName: data.entityName,
+          description: data.description,
+          severity: data.severity || "LOW",
+          changes: data.changes,
+        },
+      });
+    }
+  } catch {
+    console.error("Failed to create audit log");
+  }
+}
+
+async function logAuditStandalone(data: {
+  userId?: string;
+  action: string;
+  entityType: string;
+  entityId: string;
+  entityName?: string;
+  description?: string;
+  severity?: string;
+  changes?: object;
+}): Promise<void> {
+  try {
+    if (data.userId && isValidObjectId(data.userId)) {
+      await prisma.auditLog.create({
+        data: {
+          userId: data.userId,
+          action: data.action,
+          entityType: data.entityType,
+          entityId: data.entityId,
+          entityName: data.entityName,
+          description: data.description,
+          severity: data.severity || "LOW",
+          changes: data.changes,
+        },
+      });
+    }
+  } catch {
+    console.error("Failed to create audit log");
+  }
 }
 
 export class HoldingTaxService {
-  static async getByCitizenId(citizenId: string): Promise<IHoldingTax[]> {
-    await connectDB();
-
-    if (!mongoose.Types.ObjectId.isValid(citizenId)) {
+  static async getByCitizenId(citizenId: string): Promise<HoldingTax[]> {
+    if (!isValidObjectId(citizenId)) {
       return [];
     }
 
-    const taxes = await HoldingTax.find({
-      citizen: new mongoose.Types.ObjectId(citizenId),
-    })
-      .sort({ fiscalYear: -1 })
-      .lean();
+    const taxes = await prisma.holdingTax.findMany({
+      where: {
+        citizenId,
+        deletedAt: null,
+      },
+      orderBy: { fiscalYear: "desc" },
+    });
 
-    return taxes as IHoldingTax[];
+    return taxes;
   }
 
-  static async getBycitizenId(citizenId: string): Promise<IHoldingTax[]> {
+  // Alias for backward compatibility
+  static async getBycitizenId(citizenId: string): Promise<HoldingTax[]> {
     return this.getByCitizenId(citizenId);
   }
 
-  static async getById(id: string): Promise<IHoldingTax | null> {
-    await connectDB();
-
-    if (!mongoose.Types.ObjectId.isValid(id)) {
+  static async getById(id: string): Promise<HoldingTaxWithCitizen | null> {
+    if (!isValidObjectId(id)) {
       return null;
     }
 
-    const tax = await HoldingTax.findById(id)
-      .populate("citizen", "name nameBn nid mobile")
-      .lean();
+    const tax = await prisma.holdingTax.findUnique({
+      where: { id },
+      include: {
+        citizen: {
+          select: {
+            id: true,
+            name: true,
+            nameBn: true,
+            nid: true,
+            mobile: true,
+          },
+        },
+      },
+    });
 
-    return tax as IHoldingTax | null;
+    return tax;
   }
 
   static async create(
     data: HoldingTaxCreateData,
     createdBy?: string
-  ): Promise<{ success: boolean; tax?: IHoldingTax; message: string }> {
-    await connectDB();
+  ): Promise<{ success: boolean; tax?: HoldingTax; message: string }> {
+    // Sanitize input
+    const sanitizedData = deepSanitize(data);
 
-    const session = await mongoose.startSession();
-    session.startTransaction();
+    return prisma
+      .$transaction(async (tx) => {
+        // Check for existing tax for same holding and fiscal year
+        const existing = await tx.holdingTax.findFirst({
+          where: {
+            citizenId: sanitizedData.citizenId,
+            holdingInfo: {
+              is: {
+                holdingNo: sanitizedData.holdingInfo.holdingNo,
+              },
+            },
+            fiscalYear: sanitizedData.fiscalYear,
+            deletedAt: null,
+          },
+        });
 
-    try {
-      // Sanitize input
-      const sanitizedData = deepSanitize(data);
+        if (existing) {
+          throw new Error("Tax already exists for this holding and fiscal year");
+        }
 
-      // Check for existing tax for same holding and fiscal year
-      const existing = await HoldingTax.findOne({
-        citizen: new mongoose.Types.ObjectId(sanitizedData.citizenId),
-        "holdingInfo.holdingNo": sanitizedData.holdingInfo.holdingNo,
-        fiscalYear: sanitizedData.fiscalYear,
-      }).session(session);
+        // Generate reference number
+        const referenceNo = await generateHoldingTaxReferenceNo(
+          tx,
+          sanitizedData.fiscalYear,
+          sanitizedData.holdingInfo.ward
+        );
 
-      if (existing) {
-        await session.abortTransaction();
+        // Calculate totals
+        const arrears = sanitizedData.arrears || 0;
+        const rebate = sanitizedData.rebate || 0;
+        const penalty = sanitizedData.penalty || 0;
+        const { totalDue, balance } = calculateHoldingTaxBalance(
+          sanitizedData.assessment.annualTax,
+          arrears,
+          penalty,
+          rebate,
+          0 // totalPaid starts at 0
+        );
+
+        const tax = await tx.holdingTax.create({
+          data: {
+            referenceNo,
+            citizenId: sanitizedData.citizenId,
+            holdingInfo: {
+              holdingNo: sanitizedData.holdingInfo.holdingNo,
+              mouza: sanitizedData.holdingInfo.mouza,
+              jlNo: sanitizedData.holdingInfo.jlNo,
+              daagNo: sanitizedData.holdingInfo.daagNo,
+              khatianNo: sanitizedData.holdingInfo.khatianNo,
+              plotNo: sanitizedData.holdingInfo.plotNo,
+              ward: sanitizedData.holdingInfo.ward,
+              area: sanitizedData.holdingInfo.area,
+              areaUnit: sanitizedData.holdingInfo.areaUnit || "decimal",
+              holdingType: sanitizedData.holdingInfo.holdingType,
+              buildingType: sanitizedData.holdingInfo.buildingType,
+              floors: sanitizedData.holdingInfo.floors,
+              rooms: sanitizedData.holdingInfo.rooms,
+              yearBuilt: sanitizedData.holdingInfo.yearBuilt,
+            },
+            fiscalYear: sanitizedData.fiscalYear,
+            assessment: {
+              assessedValue: sanitizedData.assessment.assessedValue,
+              taxRate: sanitizedData.assessment.taxRate,
+              annualTax: sanitizedData.assessment.annualTax,
+              assessmentDate: new Date(),
+              assessedById: createdBy,
+            },
+            arrears,
+            rebate,
+            penalty,
+            totalDue,
+            totalPaid: 0,
+            balance,
+            dueDate: sanitizedData.dueDate,
+            status: "UNPAID",
+            payments: [],
+            createdById: createdBy,
+          },
+        });
+
+        // Log audit
+        if (createdBy) {
+          await logAudit(tx, {
+            userId: createdBy,
+            action: "CREATE",
+            entityType: "HOLDING_TAX",
+            entityId: tax.id,
+            description: `Holding tax created: ${referenceNo} for holding ${sanitizedData.holdingInfo.holdingNo}`,
+            severity: "LOW",
+          });
+        }
+
+        return {
+          success: true,
+          tax,
+          message: "Holding tax created successfully",
+        };
+      })
+      .catch((error) => {
         return {
           success: false,
-          message: "Tax already exists for this holding and fiscal year",
+          message: error instanceof Error ? error.message : "Failed to create holding tax",
         };
-      }
-
-      // Generate reference number
-      const referenceNo = await (HoldingTax as typeof HoldingTax & {
-        generateReferenceNo: (fiscalYear: string, ward: number) => Promise<string>;
-      }).generateReferenceNo(sanitizedData.fiscalYear, sanitizedData.holdingInfo.ward);
-
-      // Calculate totals
-      const arrears = sanitizedData.arrears || 0;
-      const rebate = sanitizedData.rebate || 0;
-      const totalDue = sanitizedData.assessment.annualTax + arrears - rebate;
-
-      const [tax] = await HoldingTax.create([{
-        referenceNo,
-        citizen: new mongoose.Types.ObjectId(sanitizedData.citizenId),
-        holdingInfo: sanitizedData.holdingInfo,
-        fiscalYear: sanitizedData.fiscalYear,
-        assessment: {
-          ...sanitizedData.assessment,
-          assessmentDate: new Date(),
-          assessedBy: createdBy ? new mongoose.Types.ObjectId(createdBy) : undefined,
-        },
-        arrears,
-        rebate,
-        totalDue,
-        totalPaid: 0,
-        balance: totalDue,
-        dueDate: sanitizedData.dueDate,
-        status: PaymentStatus.UNPAID,
-        payments: [],
-        createdBy: createdBy ? new mongoose.Types.ObjectId(createdBy) : undefined,
-      }], { session });
-
-      // Log audit
-      if (createdBy) {
-        await AuditLog.log({
-          user: new mongoose.Types.ObjectId(createdBy),
-          action: AuditAction.CREATE,
-          entityType: EntityType.HOLDING_TAX,
-          entityId: tax._id,
-          description: `Holding tax created: ${referenceNo} for holding ${sanitizedData.holdingInfo.holdingNo}`,
-          severity: Severity.LOW,
-        });
-      }
-
-      await session.commitTransaction();
-
-      return {
-        success: true,
-        tax: tax.toObject() as IHoldingTax,
-        message: "Holding tax created successfully",
-      };
-    } catch (error) {
-      await session.abortTransaction();
-      throw error;
-    } finally {
-      session.endSession();
-    }
+      });
   }
 
   static async addPayment(
     taxId: string,
     payment: PaymentData,
     collectedBy: string
-  ): Promise<{ success: boolean; tax?: IHoldingTax; receiptNo: string; message: string }> {
-    await connectDB();
-
-    const session = await mongoose.startSession();
-    session.startTransaction();
-
-    try {
-      if (!mongoose.Types.ObjectId.isValid(taxId)) {
-        await session.abortTransaction();
-        return { success: false, receiptNo: "", message: "Invalid tax ID" };
-      }
-
-      // Sanitize payment data
-      const sanitizedPayment = deepSanitize(payment);
-
-      const tax = await HoldingTax.findById(taxId).session(session);
-      if (!tax) {
-        await session.abortTransaction();
-        return { success: false, receiptNo: "", message: "Tax record not found" };
-      }
-
-      if (tax.balance <= 0) {
-        await session.abortTransaction();
-        return { success: false, receiptNo: "", message: "Tax already fully paid" };
-      }
-
-      if (sanitizedPayment.amount > tax.balance) {
-        await session.abortTransaction();
-        return { success: false, receiptNo: "", message: "Payment amount exceeds balance" };
-      }
-
-      // Generate receipt number
-      const receiptNo = `RCP-${Date.now().toString(36).toUpperCase()}`;
-
-      const paymentRecord = {
-        receiptNo,
-        amount: sanitizedPayment.amount,
-        paymentDate: new Date(),
-        paymentMethod: sanitizedPayment.paymentMethod,
-        transactionId: sanitizedPayment.transactionId,
-        bankName: sanitizedPayment.bankName,
-        chequeNo: sanitizedPayment.chequeNo,
-        collectedBy: getCollectorObjectId(collectedBy),
-        notes: sanitizedPayment.notes,
-      } as unknown as IHoldingTax["payments"][0];
-
-      tax.payments.push(paymentRecord);
-      tax.totalPaid += sanitizedPayment.amount;
-      tax.balance = tax.totalDue - tax.totalPaid;
-      tax.lastPaymentDate = new Date();
-
-      // Update status
-      if (tax.balance <= 0) {
-        tax.status = PaymentStatus.PAID;
-      } else {
-        tax.status = PaymentStatus.PARTIAL;
-      }
-
-      await tax.save({ session });
-
-      // Log audit
-      await AuditLog.log({
-        user: getCollectorObjectId(collectedBy),
-        action: AuditAction.PAYMENT,
-        entityType: EntityType.HOLDING_TAX,
-        entityId: tax._id,
-        description: `Payment received: ৳${sanitizedPayment.amount} for tax ${tax.referenceNo}. Receipt: ${receiptNo}`,
-        severity: Severity.LOW,
-      });
-
-      await session.commitTransaction();
-
-      return {
-        success: true,
-        tax: tax.toObject() as IHoldingTax,
-        receiptNo,
-        message: "Payment recorded successfully",
-      };
-    } catch (error) {
-      await session.abortTransaction();
-      throw error;
-    } finally {
-      session.endSession();
+  ): Promise<{ success: boolean; tax?: HoldingTax; receiptNo: string; message: string }> {
+    if (!isValidObjectId(taxId)) {
+      return { success: false, receiptNo: "", message: "Invalid tax ID" };
     }
+
+    // Sanitize payment data
+    const sanitizedPayment = deepSanitize(payment);
+
+    return prisma
+      .$transaction(async (tx) => {
+        const tax = await tx.holdingTax.findUnique({
+          where: { id: taxId },
+        });
+
+        if (!tax) {
+          throw new Error("Tax record not found");
+        }
+
+        if (tax.balance <= 0) {
+          throw new Error("Tax already fully paid");
+        }
+
+        if (sanitizedPayment.amount > tax.balance) {
+          throw new Error("Payment amount exceeds balance");
+        }
+
+        // Generate receipt number
+        const receiptNo = await generateReceiptNo(tx, tax.fiscalYear);
+
+        const now = new Date();
+        const newPayment = {
+          receiptNo,
+          amount: sanitizedPayment.amount,
+          paymentDate: now,
+          paymentMethod: sanitizedPayment.paymentMethod,
+          transactionId: sanitizedPayment.transactionId,
+          bankName: sanitizedPayment.bankName,
+          chequeNo: sanitizedPayment.chequeNo,
+          collectedById: getCollectorId(collectedBy),
+          notes: sanitizedPayment.notes,
+          createdAt: now,
+          updatedAt: now,
+        };
+
+        const newTotalPaid = tax.totalPaid + sanitizedPayment.amount;
+        const newBalance = tax.totalDue - newTotalPaid;
+        const newStatus = determinePaymentStatus(newBalance, newTotalPaid, tax.dueDate);
+
+        await tx.holdingTax.updateMany({
+          where: { id: taxId },
+          data: {
+            payments: {
+              push: newPayment,
+            },
+            totalPaid: newTotalPaid,
+            balance: newBalance,
+            lastPaymentDate: now,
+            status: newStatus,
+          },
+        });
+
+        const updatedTax = await tx.holdingTax.findUnique({
+          where: { id: taxId },
+        });
+
+        if (!updatedTax) {
+          throw new Error("Tax record not found after update");
+        }
+
+        // Log audit
+        await logAudit(tx, {
+          userId: getCollectorId(collectedBy),
+          action: "PAYMENT",
+          entityType: "HOLDING_TAX",
+          entityId: tax.id,
+          description: `Payment received: ৳${sanitizedPayment.amount} for tax ${tax.referenceNo}. Receipt: ${receiptNo}`,
+          severity: "LOW",
+        });
+
+        return {
+          success: true,
+          tax: updatedTax,
+          receiptNo,
+          message: "Payment recorded successfully",
+        };
+      })
+      .catch((error) => {
+        return {
+          success: false,
+          receiptNo: "",
+          message: error instanceof Error ? error.message : "Failed to add payment",
+        };
+      });
   }
 
   static async markAsPaid(
@@ -271,14 +410,15 @@ export class HoldingTaxService {
     paymentMethod: PaymentMethod,
     collectedBy?: string,
     notes?: string
-  ): Promise<{ success: boolean; tax?: IHoldingTax; receiptNo: string; message: string }> {
-    await connectDB();
-
-    if (!mongoose.Types.ObjectId.isValid(taxId)) {
+  ): Promise<{ success: boolean; tax?: HoldingTax; receiptNo: string; message: string }> {
+    if (!isValidObjectId(taxId)) {
       return { success: false, receiptNo: "", message: "Invalid tax ID" };
     }
 
-    const tax = await HoldingTax.findById(taxId);
+    const tax = await prisma.holdingTax.findUnique({
+      where: { id: taxId },
+    });
+
     if (!tax) {
       return { success: false, receiptNo: "", message: "Tax record not found" };
     }
@@ -300,73 +440,166 @@ export class HoldingTaxService {
 
   static async checkUnpaidTax(
     citizenId: string
-  ): Promise<{ hasUnpaid: boolean; unpaidTaxes: IHoldingTax[]; totalDue: number }> {
-    await connectDB();
-
-    if (!mongoose.Types.ObjectId.isValid(citizenId)) {
+  ): Promise<{ hasUnpaid: boolean; unpaidTaxes: HoldingTax[]; totalDue: number }> {
+    if (!isValidObjectId(citizenId)) {
       return { hasUnpaid: false, unpaidTaxes: [], totalDue: 0 };
     }
 
-    const unpaidTaxes = await HoldingTax.find({
-      citizen: new mongoose.Types.ObjectId(citizenId),
-      status: { $in: [PaymentStatus.UNPAID, PaymentStatus.PARTIAL, PaymentStatus.OVERDUE] },
-      deletedAt: null,
-    }).lean();
+    const unpaidTaxes = await prisma.holdingTax.findMany({
+      where: {
+        citizenId,
+        status: { in: ["UNPAID", "PARTIAL", "OVERDUE"] },
+        deletedAt: null,
+      },
+    });
 
     const totalDue = unpaidTaxes.reduce((sum, tax) => sum + tax.balance, 0);
 
     return {
       hasUnpaid: unpaidTaxes.length > 0,
-      unpaidTaxes: unpaidTaxes as IHoldingTax[],
+      unpaidTaxes,
       totalDue,
     };
   }
 
-  static async getOverdueTaxes(wardNo?: number): Promise<IHoldingTax[]> {
-    await connectDB();
-
+  static async getOverdueTaxes(wardNo?: number): Promise<HoldingTaxWithCitizen[]> {
     const now = new Date();
-    const filter: Record<string, unknown> = {
-      dueDate: { $lt: now },
-      status: { $in: [PaymentStatus.UNPAID, PaymentStatus.PARTIAL] },
+
+    // Build filter for updating overdue records
+    const baseWhere: Prisma.HoldingTaxWhereInput = {
+      dueDate: { lt: now },
+      status: { in: ["UNPAID", "PARTIAL"] },
       deletedAt: null,
     };
 
+    // Update overdue status
+    // For nested field filtering, we need to use raw query for ward filtering during update
     if (wardNo) {
-      filter["holdingInfo.ward"] = wardNo;
+      // Use $runCommandRaw for updating with nested field condition
+      await prisma.$runCommandRaw({
+        update: "holding_taxes",
+        updates: [
+          {
+            q: {
+              dueDate: { $lt: now },
+              status: { $in: ["UNPAID", "PARTIAL"] },
+              deletedAt: null,
+              "holdingInfo.ward": wardNo,
+            },
+            u: { $set: { status: "OVERDUE" } },
+            multi: true,
+          },
+        ],
+      });
+    } else {
+      await prisma.holdingTax.updateMany({
+        where: baseWhere,
+        data: { status: "OVERDUE" },
+      });
     }
 
-    // Update overdue status
-    await HoldingTax.updateMany(filter, { status: PaymentStatus.OVERDUE });
+    // Fetch overdue taxes with citizen info
+    let overdueTaxes: HoldingTaxWithCitizen[];
 
-    const taxes = await HoldingTax.find({
-      ...filter,
-      status: PaymentStatus.OVERDUE,
-    })
-      .populate("citizen", "name nameBn nid mobile")
-      .sort({ dueDate: 1 })
-      .lean();
+    if (wardNo) {
+      // Use aggregation for nested field filtering
+      const result = (await prisma.$runCommandRaw({
+        aggregate: "holding_taxes",
+        pipeline: [
+          {
+            $match: {
+              status: "OVERDUE",
+              deletedAt: null,
+              "holdingInfo.ward": wardNo,
+            },
+          },
+          { $sort: { dueDate: 1 } },
+          {
+            $lookup: {
+              from: "citizens",
+              localField: "citizenId",
+              foreignField: "_id",
+              as: "citizenData",
+            },
+          },
+          { $unwind: { path: "$citizenData", preserveNullAndEmptyArrays: true } },
+        ],
+        cursor: {},
+      })) as unknown as {
+        cursor: {
+          firstBatch: Array<HoldingTax & { citizenData?: Citizen }>;
+        };
+      };
 
-    return taxes as IHoldingTax[];
+      overdueTaxes = (result.cursor?.firstBatch || []).map((doc) => ({
+        ...doc,
+        id: (doc as unknown as { _id: { $oid: string } })._id.$oid || String((doc as unknown as { _id: unknown })._id),
+        citizen: doc.citizenData
+          ? {
+              id: String((doc.citizenData as unknown as { _id: unknown })._id),
+              name: doc.citizenData.name,
+              nameBn: doc.citizenData.nameBn,
+              nid: doc.citizenData.nid,
+              mobile: doc.citizenData.mobile,
+            }
+          : undefined,
+      }));
+    } else {
+      overdueTaxes = await prisma.holdingTax.findMany({
+        where: {
+          status: "OVERDUE",
+          deletedAt: null,
+        },
+        orderBy: { dueDate: "asc" },
+        include: {
+          citizen: {
+            select: {
+              id: true,
+              name: true,
+              nameBn: true,
+              nid: true,
+              mobile: true,
+            },
+          },
+        },
+      });
+    }
+
+    return overdueTaxes;
   }
 
   static async getPaymentHistory(
     taxId: string
-  ): Promise<{ payments: IHoldingTax["payments"]; tax: IHoldingTax | null }> {
-    await connectDB();
+  ): Promise<{ payments: HoldingTax["payments"]; tax: HoldingTaxWithCitizen | null }> {
+    if (!isValidObjectId(taxId)) {
+      return { payments: [], tax: null };
+    }
 
-    const tax = await HoldingTax.findById(taxId)
-      .populate("citizen", "name nameBn nid")
-      .populate("payments.collectedBy", "name")
-      .lean();
+    const tax = await prisma.holdingTax.findUnique({
+      where: { id: taxId },
+      include: {
+        citizen: {
+          select: {
+            id: true,
+            name: true,
+            nameBn: true,
+            nid: true,
+            mobile: true,
+          },
+        },
+      },
+    });
 
     if (!tax) {
       return { payments: [], tax: null };
     }
 
+    // For collectedBy user info, we'd need to fetch users separately if needed
+    // The payments array contains collectedById which can be used to look up users
+
     return {
       payments: tax.payments,
-      tax: tax as IHoldingTax,
+      tax,
     };
   }
 
@@ -377,58 +610,80 @@ export class HoldingTaxService {
     collectionRate: number;
     byWard: Array<{ ward: number; assessed: number; collected: number }>;
   }> {
-    await connectDB();
+    const matchStage = fiscalYear
+      ? { deletedAt: null, fiscalYear }
+      : { deletedAt: null };
 
-    const matchStage: Record<string, unknown> = { deletedAt: null };
-    if (fiscalYear) {
-      matchStage.fiscalYear = fiscalYear;
-    }
-
-    const [overall, byWard] = await Promise.all([
-      HoldingTax.aggregate([
-        { $match: matchStage },
-        {
-          $group: {
-            _id: null,
-            totalAssessed: { $sum: "$totalDue" },
-            totalCollected: { $sum: "$totalPaid" },
+    // Use raw aggregation for both overall stats and ward breakdown
+    const [overallResult, byWardResult] = await Promise.all([
+      prisma.$runCommandRaw({
+        aggregate: "holding_taxes",
+        pipeline: [
+          { $match: matchStage },
+          {
+            $group: {
+              _id: null,
+              totalAssessed: { $sum: "$totalDue" },
+              totalCollected: { $sum: "$totalPaid" },
+            },
           },
-        },
-      ]),
-      HoldingTax.aggregate([
-        { $match: matchStage },
-        {
-          $group: {
-            _id: "$holdingInfo.ward",
-            assessed: { $sum: "$totalDue" },
-            collected: { $sum: "$totalPaid" },
+        ],
+        cursor: {},
+      }) as unknown as Promise<{
+        cursor: {
+          firstBatch: Array<{ _id: null; totalAssessed: number; totalCollected: number }>;
+        };
+      }>,
+      prisma.$runCommandRaw({
+        aggregate: "holding_taxes",
+        pipeline: [
+          { $match: matchStage },
+          {
+            $group: {
+              _id: "$holdingInfo.ward",
+              assessed: { $sum: "$totalDue" },
+              collected: { $sum: "$totalPaid" },
+            },
           },
-        },
-        { $sort: { _id: 1 } },
-      ]),
+          { $sort: { _id: 1 } },
+        ],
+        cursor: {},
+      }) as unknown as Promise<{
+        cursor: {
+          firstBatch: Array<{ _id: number; assessed: number; collected: number }>;
+        };
+      }>,
     ]);
 
-    const stats = overall[0] || { totalAssessed: 0, totalCollected: 0 };
-    const totalPending = stats.totalAssessed - stats.totalCollected;
+    const overall = overallResult.cursor?.firstBatch?.[0] || {
+      totalAssessed: 0,
+      totalCollected: 0,
+    };
+    const totalPending = overall.totalAssessed - overall.totalCollected;
     const collectionRate =
-      stats.totalAssessed > 0
-        ? Math.round((stats.totalCollected / stats.totalAssessed) * 100)
+      overall.totalAssessed > 0
+        ? Math.round((overall.totalCollected / overall.totalAssessed) * 100)
         : 0;
 
+    const byWard = (byWardResult.cursor?.firstBatch || []).map((w) => ({
+      ward: w._id,
+      assessed: w.assessed,
+      collected: w.collected,
+    }));
+
     return {
-      totalAssessed: stats.totalAssessed,
-      totalCollected: stats.totalCollected,
+      totalAssessed: overall.totalAssessed,
+      totalCollected: overall.totalCollected,
       totalPending,
       collectionRate,
-      byWard: byWard.map((w) => ({
-        ward: w._id,
-        assessed: w.assessed,
-        collected: w.collected,
-      })),
+      byWard,
     };
   }
 
-  static async getReceipt(taxId: string, receiptNo: string): Promise<{
+  static async getReceipt(
+    taxId: string,
+    receiptNo: string
+  ): Promise<{
     success: boolean;
     receipt?: {
       receiptNo: string;
@@ -438,7 +693,7 @@ export class HoldingTaxService {
       citizen: {
         name: string;
         nameBn: string;
-        nid?: string;
+        nid?: string | null;
       };
       holdingNo: string;
       fiscalYear: string;
@@ -446,12 +701,22 @@ export class HoldingTaxService {
     };
     message: string;
   }> {
-    await connectDB();
+    if (!isValidObjectId(taxId)) {
+      return { success: false, message: "Invalid tax ID" };
+    }
 
-    const tax = await HoldingTax.findById(taxId)
-      .populate("citizen", "name nameBn nid")
-      .populate("payments.collectedBy", "name")
-      .lean();
+    const tax = await prisma.holdingTax.findUnique({
+      where: { id: taxId },
+      include: {
+        citizen: {
+          select: {
+            name: true,
+            nameBn: true,
+            nid: true,
+          },
+        },
+      },
+    });
 
     if (!tax) {
       return { success: false, message: "Tax record not found" };
@@ -469,8 +734,15 @@ export class HoldingTaxService {
       return { success: false, message: "Receipt not found" };
     }
 
-    const citizen = tax.citizen as unknown as { name: string; nameBn: string; nid?: string };
-    const collectedBy = payment.collectedBy as unknown as { name: string } | undefined;
+    // Fetch collector info if needed
+    let collectorName: string | undefined;
+    if (payment.collectedById && isValidObjectId(payment.collectedById)) {
+      const collector = await prisma.user.findUnique({
+        where: { id: payment.collectedById },
+        select: { name: true },
+      });
+      collectorName = collector?.name;
+    }
 
     return {
       success: true,
@@ -480,15 +752,365 @@ export class HoldingTaxService {
         paymentDate: payment.paymentDate,
         paymentMethod: payment.paymentMethod,
         citizen: {
-          name: citizen.name,
-          nameBn: citizen.nameBn,
-          nid: citizen.nid,
+          name: tax.citizen.name,
+          nameBn: tax.citizen.nameBn,
+          nid: tax.citizen.nid,
         },
         holdingNo: tax.holdingInfo.holdingNo,
         fiscalYear: tax.fiscalYear,
-        collectedBy: collectedBy?.name,
+        collectedBy: collectorName,
       },
       message: "Receipt found",
     };
+  }
+
+  /**
+   * Get taxes by fiscal year with pagination
+   */
+  static async getByFiscalYear(
+    fiscalYear: string,
+    options: {
+      page?: number;
+      limit?: number;
+      status?: HoldingTaxPaymentStatus;
+      wardNo?: number;
+    } = {}
+  ): Promise<{
+    taxes: HoldingTaxWithCitizen[];
+    total: number;
+    page: number;
+    totalPages: number;
+  }> {
+    const { page = 1, limit = 20, status, wardNo } = options;
+    const skip = (page - 1) * limit;
+
+    let where: Prisma.HoldingTaxWhereInput = {
+      fiscalYear,
+      deletedAt: null,
+    };
+
+    if (status) {
+      where.status = status;
+    }
+
+    // Ward filtering requires raw query for nested composite type
+    if (wardNo) {
+      const result = (await prisma.$runCommandRaw({
+        aggregate: "holding_taxes",
+        pipeline: [
+          {
+            $match: {
+              fiscalYear,
+              deletedAt: null,
+              "holdingInfo.ward": wardNo,
+              ...(status ? { status } : {}),
+            },
+          },
+          {
+            $facet: {
+              data: [
+                { $skip: skip },
+                { $limit: limit },
+                {
+                  $lookup: {
+                    from: "citizens",
+                    localField: "citizenId",
+                    foreignField: "_id",
+                    as: "citizenData",
+                  },
+                },
+                { $unwind: { path: "$citizenData", preserveNullAndEmptyArrays: true } },
+              ],
+              count: [{ $count: "total" }],
+            },
+          },
+        ],
+        cursor: {},
+      })) as unknown as {
+        cursor: {
+          firstBatch: Array<{
+            data: Array<HoldingTax & { citizenData?: Citizen }>;
+            count: Array<{ total: number }>;
+          }>;
+        };
+      };
+
+      const batch = result.cursor?.firstBatch?.[0];
+      const taxes = (batch?.data || []).map((doc) => ({
+        ...doc,
+        id: (doc as unknown as { _id: { $oid: string } })._id.$oid || String((doc as unknown as { _id: unknown })._id),
+        citizen: doc.citizenData
+          ? {
+              id: String((doc.citizenData as unknown as { _id: unknown })._id),
+              name: doc.citizenData.name,
+              nameBn: doc.citizenData.nameBn,
+              nid: doc.citizenData.nid,
+              mobile: doc.citizenData.mobile,
+            }
+          : undefined,
+      }));
+      const total = batch?.count?.[0]?.total || 0;
+
+      return {
+        taxes,
+        total,
+        page,
+        totalPages: Math.ceil(total / limit),
+      };
+    }
+
+    const [taxes, total] = await Promise.all([
+      prisma.holdingTax.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { createdAt: "desc" },
+        include: {
+          citizen: {
+            select: {
+              id: true,
+              name: true,
+              nameBn: true,
+              nid: true,
+              mobile: true,
+            },
+          },
+        },
+      }),
+      prisma.holdingTax.count({ where }),
+    ]);
+
+    return {
+      taxes,
+      total,
+      page,
+      totalPages: Math.ceil(total / limit),
+    };
+  }
+
+  /**
+   * Get current fiscal year helper
+   */
+  static getCurrentFiscalYear(): string {
+    return getCurrentFiscalYear();
+  }
+
+  /**
+   * Update holding tax assessment
+   */
+  static async updateAssessment(
+    taxId: string,
+    assessment: {
+      assessedValue: number;
+      taxRate: number;
+      annualTax: number;
+      notes?: string;
+    },
+    updatedBy?: string
+  ): Promise<{ success: boolean; tax?: HoldingTax; message: string }> {
+    if (!isValidObjectId(taxId)) {
+      return { success: false, message: "Invalid tax ID" };
+    }
+
+    return prisma
+      .$transaction(async (tx) => {
+        const tax = await tx.holdingTax.findUnique({
+          where: { id: taxId },
+        });
+
+        if (!tax) {
+          throw new Error("Tax record not found");
+        }
+
+        // Don't allow reassessment if payments have been made
+        if (tax.totalPaid > 0) {
+          throw new Error("Cannot reassess tax after payments have been made");
+        }
+
+        const sanitizedAssessment = deepSanitize(assessment);
+
+        // Recalculate totals
+        const { totalDue, balance } = calculateHoldingTaxBalance(
+          sanitizedAssessment.annualTax,
+          tax.arrears,
+          tax.penalty,
+          tax.rebate,
+          tax.totalPaid
+        );
+
+        await tx.holdingTax.updateMany({
+          where: { id: taxId },
+          data: {
+            assessment: {
+              assessedValue: sanitizedAssessment.assessedValue,
+              taxRate: sanitizedAssessment.taxRate,
+              annualTax: sanitizedAssessment.annualTax,
+              assessmentDate: new Date(),
+              assessedById: updatedBy,
+              notes: sanitizedAssessment.notes,
+            },
+            totalDue,
+            balance,
+            updatedById: updatedBy,
+          },
+        });
+
+        const updatedTax = await tx.holdingTax.findUnique({
+          where: { id: taxId },
+        });
+
+        if (!updatedTax) {
+          throw new Error("Tax record not found after update");
+        }
+
+        // Log audit
+        if (updatedBy) {
+          await logAudit(tx, {
+            userId: updatedBy,
+            action: "UPDATE",
+            entityType: "HOLDING_TAX",
+            entityId: tax.id,
+            description: `Holding tax reassessed: ${tax.referenceNo}. New annual tax: ৳${sanitizedAssessment.annualTax}`,
+            severity: "MEDIUM",
+            changes: {
+              before: tax.assessment,
+              after: sanitizedAssessment,
+            },
+          });
+        }
+
+        return {
+          success: true,
+          tax: updatedTax,
+          message: "Assessment updated successfully",
+        };
+      })
+      .catch((error) => {
+        return {
+          success: false,
+          message: error instanceof Error ? error.message : "Failed to update assessment",
+        };
+      });
+  }
+
+  /**
+   * Waive tax (mark as waived)
+   */
+  static async waiveTax(
+    taxId: string,
+    reason: string,
+    waivedBy: string
+  ): Promise<{ success: boolean; tax?: HoldingTax; message: string }> {
+    if (!isValidObjectId(taxId)) {
+      return { success: false, message: "Invalid tax ID" };
+    }
+
+    if (!isValidObjectId(waivedBy)) {
+      return { success: false, message: "Invalid user ID" };
+    }
+
+    return prisma
+      .$transaction(async (tx) => {
+        const tax = await tx.holdingTax.findUnique({
+          where: { id: taxId },
+        });
+
+        if (!tax) {
+          throw new Error("Tax record not found");
+        }
+
+        if (tax.status === "PAID") {
+          throw new Error("Cannot waive a fully paid tax");
+        }
+
+        await tx.holdingTax.updateMany({
+          where: { id: taxId },
+          data: {
+            status: "WAIVED",
+            updatedById: waivedBy,
+          },
+        });
+
+        const updatedTax = await tx.holdingTax.findUnique({
+          where: { id: taxId },
+        });
+
+        if (!updatedTax) {
+          throw new Error("Tax record not found after update");
+        }
+
+        // Log audit
+        await logAudit(tx, {
+          userId: waivedBy,
+          action: "WAIVE",
+          entityType: "HOLDING_TAX",
+          entityId: tax.id,
+          description: `Holding tax waived: ${tax.referenceNo}. Reason: ${reason}`,
+          severity: "HIGH",
+        });
+
+        return {
+          success: true,
+          tax: updatedTax,
+          message: "Tax waived successfully",
+        };
+      })
+      .catch((error) => {
+        return {
+          success: false,
+          message: error instanceof Error ? error.message : "Failed to waive tax",
+        };
+      });
+  }
+
+  /**
+   * Soft delete holding tax record
+   */
+  static async delete(
+    taxId: string,
+    deletedBy?: string
+  ): Promise<{ success: boolean; message: string }> {
+    if (!isValidObjectId(taxId)) {
+      return { success: false, message: "Invalid tax ID" };
+    }
+
+    return prisma
+      .$transaction(async (tx) => {
+        const tax = await tx.holdingTax.findUnique({
+          where: { id: taxId },
+        });
+
+        if (!tax) {
+          throw new Error("Tax record not found");
+        }
+
+        await tx.holdingTax.updateMany({
+          where: { id: taxId },
+          data: {
+            deletedAt: new Date(),
+            updatedById: deletedBy,
+          },
+        });
+
+        // Log audit
+        if (deletedBy) {
+          await logAudit(tx, {
+            userId: deletedBy,
+            action: "SOFT_DELETE",
+            entityType: "HOLDING_TAX",
+            entityId: tax.id,
+            description: `Holding tax deleted: ${tax.referenceNo}`,
+            severity: "HIGH",
+          });
+        }
+
+        return { success: true, message: "Holding tax deleted successfully" };
+      })
+      .catch((error) => {
+        return {
+          success: false,
+          message: error instanceof Error ? error.message : "Failed to delete holding tax",
+        };
+      });
   }
 }

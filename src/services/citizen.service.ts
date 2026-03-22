@@ -1,8 +1,11 @@
-import { connectDB } from "@/lib/mongodb";
-import { Citizen, ICitizen, CitizenStatus, Gender, MaritalStatus } from "@/models/Citizen";
-import { AuditLog, AuditAction, EntityType, Severity } from "@/models/AuditLog";
-import mongoose from "mongoose";
+import { prisma } from "@/lib/db";
+import { generateCitizenRegistrationNo, isValidObjectId } from "@/lib/prisma-utils";
+import { calculateAge } from "@/lib/prisma-virtuals";
 import { deepSanitize } from "@/lib/sanitize";
+import type { Citizen, Gender, MaritalStatus, CitizenStatus, Prisma } from "@prisma/client";
+
+// Re-export enum values for backward compatibility
+export { CitizenStatus, Gender, MaritalStatus } from "@prisma/client";
 
 export interface CitizenSearchParams {
   query?: string;
@@ -13,6 +16,17 @@ export interface CitizenSearchParams {
   limit?: number;
   sortBy?: string;
   sortOrder?: "asc" | "desc";
+}
+
+export interface CitizenAddress {
+  village?: string;
+  ward: number;
+  postOffice?: string;
+  postCode?: string;
+  upazila?: string;
+  district?: string;
+  division?: string;
+  fullAddress?: string;
 }
 
 export interface CitizenCreateData {
@@ -32,26 +46,8 @@ export interface CitizenCreateData {
   occupation?: string;
   mobile?: string;
   email?: string;
-  presentAddress: {
-    village?: string;
-    ward: number;
-    postOffice?: string;
-    postCode?: string;
-    upazila?: string;
-    district?: string;
-    division?: string;
-    fullAddress?: string;
-  };
-  permanentAddress: {
-    village?: string;
-    ward: number;
-    postOffice?: string;
-    postCode?: string;
-    upazila?: string;
-    district?: string;
-    division?: string;
-    fullAddress?: string;
-  };
+  presentAddress: CitizenAddress;
+  permanentAddress: CitizenAddress;
   holdingNo?: string;
   photo?: string;
   isFreedomFighter?: boolean;
@@ -59,15 +55,47 @@ export interface CitizenCreateData {
   isWidow?: boolean;
 }
 
+export interface CitizenWithAge extends Citizen {
+  age: number | null;
+}
+
+async function logAudit(data: {
+  userId?: string;
+  action: string;
+  entityType: string;
+  entityId: string;
+  entityName?: string;
+  description?: string;
+  severity?: string;
+  changes?: object;
+}): Promise<void> {
+  try {
+    if (data.userId && isValidObjectId(data.userId)) {
+      await prisma.auditLog.create({
+        data: {
+          userId: data.userId,
+          action: data.action,
+          entityType: data.entityType,
+          entityId: data.entityId,
+          entityName: data.entityName,
+          description: data.description,
+          severity: data.severity || "LOW",
+          changes: data.changes,
+        },
+      });
+    }
+  } catch {
+    console.error("Failed to create audit log");
+  }
+}
+
 export class CitizenService {
   static async search(params: CitizenSearchParams): Promise<{
-    citizens: ICitizen[];
+    citizens: CitizenWithAge[];
     total: number;
     page: number;
     totalPages: number;
   }> {
-    await connectDB();
-
     const {
       query,
       ward,
@@ -79,180 +107,206 @@ export class CitizenService {
       sortOrder = "desc",
     } = params;
 
-    const filter: Record<string, unknown> = {};
+    const where: Prisma.CitizenWhereInput = {
+      deletedAt: null,
+    };
 
     if (query) {
-      filter.$or = [
-        { name: { $regex: query, $options: "i" } },
-        { nameBn: { $regex: query, $options: "i" } },
-        { nid: { $regex: query, $options: "i" } },
-        { mobile: { $regex: query, $options: "i" } },
-        { registrationNo: { $regex: query, $options: "i" } },
+      where.OR = [
+        { name: { contains: query, mode: "insensitive" } },
+        { nameBn: { contains: query, mode: "insensitive" } },
+        { nid: { contains: query, mode: "insensitive" } },
+        { mobile: { contains: query, mode: "insensitive" } },
+        { registrationNo: { contains: query, mode: "insensitive" } },
       ];
     }
 
     if (ward) {
-      filter["presentAddress.ward"] = ward;
+      where.presentAddress = { is: { ward } };
     }
 
     if (status) {
-      filter.status = status;
+      where.status = status;
     }
 
     if (gender) {
-      filter.gender = gender;
+      where.gender = gender;
     }
 
     const skip = (page - 1) * limit;
-    const sort: Record<string, 1 | -1> = { [sortBy]: sortOrder === "asc" ? 1 : -1 };
+    const orderBy: Prisma.CitizenOrderByWithRelationInput = { [sortBy]: sortOrder };
 
     const [citizens, total] = await Promise.all([
-      Citizen.find(filter)
-        .sort(sort)
-        .skip(skip)
-        .limit(limit)
-        .lean(),
-      Citizen.countDocuments(filter),
+      prisma.citizen.findMany({
+        where,
+        orderBy,
+        skip,
+        take: limit,
+      }),
+      prisma.citizen.count({ where }),
     ]);
 
+    // Add computed age to each citizen
+    const citizensWithAge: CitizenWithAge[] = citizens.map((citizen) => ({
+      ...citizen,
+      age: calculateAge(citizen.dateOfBirth),
+    }));
+
     return {
-      citizens: citizens as ICitizen[],
+      citizens: citizensWithAge,
       total,
       page,
       totalPages: Math.ceil(total / limit),
     };
   }
 
-  static async getById(id: string): Promise<ICitizen | null> {
-    await connectDB();
-
-    if (!mongoose.Types.ObjectId.isValid(id)) {
+  static async getById(id: string): Promise<(Citizen & { certificates: unknown[]; holdingTaxes: unknown[] }) | null> {
+    if (!isValidObjectId(id)) {
       return null;
     }
 
-    const citizen = await Citizen.findById(id)
-      .populate("certificates")
-      .populate("holdingTaxes")
-      .lean();
+    const citizen = await prisma.citizen.findUnique({
+      where: { id },
+      include: {
+        certificates: true,
+        holdingTaxes: true,
+      },
+    });
 
-    return citizen as ICitizen | null;
+    return citizen;
   }
 
-  static async getByNid(nid: string): Promise<ICitizen | null> {
-    await connectDB();
-    const citizen = await Citizen.findOne({ nid }).lean();
-    return citizen as ICitizen | null;
+  static async getByNid(nid: string): Promise<Citizen | null> {
+    const citizen = await prisma.citizen.findFirst({
+      where: { nid, deletedAt: null },
+    });
+
+    return citizen;
   }
 
   static async create(
     data: CitizenCreateData,
     createdBy?: string
-  ): Promise<{ success: boolean; citizen?: ICitizen; message: string }> {
-    await connectDB();
+  ): Promise<{ success: boolean; citizen?: Citizen; message: string }> {
+    // Sanitize input data
+    const sanitizedData = deepSanitize(data);
 
-    const session = await mongoose.startSession();
-    session.startTransaction();
-
-    try {
-      // Sanitize input data
-      const sanitizedData = deepSanitize(data);
-
+    return prisma.$transaction(async (tx) => {
       // Check for duplicates
       if (sanitizedData.nid) {
-        const existingNid = await Citizen.findOne({ 
-          nid: sanitizedData.nid,
-          deletedAt: null 
-        }).session(session);
+        const existingNid = await tx.citizen.findFirst({
+          where: { nid: sanitizedData.nid, deletedAt: null },
+        });
         if (existingNid) {
-          await session.abortTransaction();
-          return { success: false, message: "NID already registered" };
+          throw new Error("NID already registered");
         }
       }
 
       if (sanitizedData.birthCertificateNo) {
-        const existingBc = await Citizen.findOne({ 
-          birthCertificateNo: sanitizedData.birthCertificateNo,
-          deletedAt: null 
-        }).session(session);
+        const existingBc = await tx.citizen.findFirst({
+          where: { birthCertificateNo: sanitizedData.birthCertificateNo, deletedAt: null },
+        });
         if (existingBc) {
-          await session.abortTransaction();
-          return { success: false, message: "Birth certificate number already registered" };
+          throw new Error("Birth certificate number already registered");
         }
       }
 
       // Generate registration number
-      const registrationNo = await (Citizen as typeof Citizen & {
-        generateRegistrationNo: (ward: number, year?: number) => Promise<string>;
-      }).generateRegistrationNo(sanitizedData.presentAddress.ward);
+      const registrationNo = await generateCitizenRegistrationNo(
+        tx,
+        sanitizedData.presentAddress.ward
+      );
 
-      const citizen = await Citizen.create([{
-        ...sanitizedData,
-        registrationNo,
-        createdBy: createdBy ? new mongoose.Types.ObjectId(createdBy) : undefined,
-      }], { session });
+      const citizen = await tx.citizen.create({
+        data: {
+          registrationNo,
+          nid: sanitizedData.nid,
+          birthCertificateNo: sanitizedData.birthCertificateNo,
+          name: sanitizedData.name,
+          nameEn: sanitizedData.nameEn,
+          nameBn: sanitizedData.nameBn,
+          fatherName: sanitizedData.fatherName,
+          fatherNameBn: sanitizedData.fatherNameBn,
+          motherName: sanitizedData.motherName,
+          motherNameBn: sanitizedData.motherNameBn,
+          dateOfBirth: sanitizedData.dateOfBirth,
+          gender: sanitizedData.gender,
+          maritalStatus: sanitizedData.maritalStatus || "SINGLE",
+          religion: sanitizedData.religion,
+          occupation: sanitizedData.occupation,
+          mobile: sanitizedData.mobile,
+          email: sanitizedData.email,
+          presentAddress: sanitizedData.presentAddress,
+          permanentAddress: sanitizedData.permanentAddress,
+          holdingNo: sanitizedData.holdingNo,
+          photo: sanitizedData.photo,
+          isFreedomFighter: sanitizedData.isFreedomFighter || false,
+          isDisabled: sanitizedData.isDisabled || false,
+          isWidow: sanitizedData.isWidow || false,
+          createdById: createdBy,
+        },
+      });
 
       // Log audit
-      if (createdBy) {
-        await AuditLog.log({
-          user: new mongoose.Types.ObjectId(createdBy),
-          action: AuditAction.CREATE,
-          entityType: EntityType.CITIZEN,
-          entityId: citizen[0]._id,
-          entityName: citizen[0].name,
-          description: `Citizen created: ${citizen[0].name} (${citizen[0].registrationNo})`,
-          severity: Severity.LOW,
+      if (createdBy && isValidObjectId(createdBy)) {
+        await tx.auditLog.create({
+          data: {
+            userId: createdBy,
+            action: "CREATE",
+            entityType: "CITIZEN",
+            entityId: citizen.id,
+            entityName: citizen.name,
+            description: `Citizen created: ${citizen.name} (${citizen.registrationNo})`,
+            severity: "LOW",
+          },
         });
       }
 
-      await session.commitTransaction();
-
       return {
         success: true,
-        citizen: citizen[0].toObject() as ICitizen,
+        citizen,
         message: "Citizen registered successfully",
       };
-    } catch (error) {
-      await session.abortTransaction();
-      throw error;
-    } finally {
-      session.endSession();
-    }
+    }).catch((error) => {
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : "Failed to create citizen",
+      };
+    });
   }
 
   static async update(
     id: string,
     data: Partial<CitizenCreateData>,
     updatedBy?: string
-  ): Promise<{ success: boolean; citizen?: ICitizen; message: string }> {
-    await connectDB();
-
-    if (!mongoose.Types.ObjectId.isValid(id)) {
+  ): Promise<{ success: boolean; citizen?: Citizen; message: string }> {
+    if (!isValidObjectId(id)) {
       return { success: false, message: "Invalid citizen ID" };
     }
 
-    const session = await mongoose.startSession();
-    session.startTransaction();
+    // Sanitize input data
+    const sanitizedData = deepSanitize(data);
 
-    try {
-      // Sanitize input data
-      const sanitizedData = deepSanitize(data);
+    return prisma.$transaction(async (tx) => {
+      const citizen = await tx.citizen.findUnique({
+        where: { id },
+      });
 
-      const citizen = await Citizen.findById(id).session(session);
       if (!citizen) {
-        await session.abortTransaction();
-        return { success: false, message: "Citizen not found" };
+        throw new Error("Citizen not found");
       }
 
       // Check for NID duplicate if changing
       if (sanitizedData.nid && sanitizedData.nid !== citizen.nid) {
-        const existingNid = await Citizen.findOne({ 
-          nid: sanitizedData.nid, 
-          _id: { $ne: id },
-          deletedAt: null 
-        }).session(session);
+        const existingNid = await tx.citizen.findFirst({
+          where: {
+            nid: sanitizedData.nid,
+            id: { not: id },
+            deletedAt: null,
+          },
+        });
         if (existingNid) {
-          await session.abortTransaction();
-          return { success: false, message: "NID already registered to another citizen" };
+          throw new Error("NID already registered to another citizen");
         }
       }
 
@@ -264,94 +318,103 @@ export class CitizenService {
 
       Object.keys(sanitizedData).forEach((key) => {
         const k = key as keyof typeof sanitizedData;
-        if (citizen[k] !== sanitizedData[k]) {
-          changes.before[key] = citizen[k];
+        const currentValue = citizen[k as keyof typeof citizen];
+        if (JSON.stringify(currentValue) !== JSON.stringify(sanitizedData[k])) {
+          changes.before[key] = currentValue;
           changes.after[key] = sanitizedData[k];
         }
       });
 
-      Object.assign(citizen, {
-        ...sanitizedData,
-        updatedBy: updatedBy ? new mongoose.Types.ObjectId(updatedBy) : undefined,
+      await tx.citizen.updateMany({
+        where: { id },
+        data: {
+          ...sanitizedData,
+          updatedById: updatedBy,
+        },
       });
 
-      await citizen.save({ session });
+      const updatedCitizen = await tx.citizen.findUnique({
+        where: { id },
+      });
 
-      // Log audit
-      if (updatedBy && Object.keys(changes.before).length > 0) {
-        await AuditLog.log({
-          user: new mongoose.Types.ObjectId(updatedBy),
-          action: AuditAction.UPDATE,
-          entityType: EntityType.CITIZEN,
-          entityId: citizen._id,
-          entityName: citizen.name,
-          description: `Citizen updated: ${citizen.name}`,
-          changes,
-          severity: Severity.LOW,
-        });
+      if (!updatedCitizen) {
+        throw new Error("Citizen not found after update");
       }
 
-      await session.commitTransaction();
+      // Log audit
+      if (updatedBy && isValidObjectId(updatedBy) && Object.keys(changes.before).length > 0) {
+        await tx.auditLog.create({
+          data: {
+            userId: updatedBy,
+            action: "UPDATE",
+            entityType: "CITIZEN",
+            entityId: citizen.id,
+            entityName: citizen.name,
+            description: `Citizen updated: ${citizen.name}`,
+            severity: "LOW",
+            changes,
+          },
+        });
+      }
 
       return {
         success: true,
-        citizen: citizen.toObject() as ICitizen,
+        citizen: updatedCitizen,
         message: "Citizen updated successfully",
       };
-    } catch (error) {
-      await session.abortTransaction();
-      throw error;
-    } finally {
-      session.endSession();
-    }
+    }).catch((error) => {
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : "Failed to update citizen",
+      };
+    });
   }
 
   static async delete(id: string, deletedBy?: string): Promise<{ success: boolean; message: string }> {
-    await connectDB();
-
-    if (!mongoose.Types.ObjectId.isValid(id)) {
+    if (!isValidObjectId(id)) {
       return { success: false, message: "Invalid citizen ID" };
     }
 
-    const session = await mongoose.startSession();
-    session.startTransaction();
+    return prisma.$transaction(async (tx) => {
+      const citizen = await tx.citizen.findUnique({
+        where: { id },
+      });
 
-    try {
-      const citizen = await Citizen.findById(id).session(session);
       if (!citizen) {
-        await session.abortTransaction();
-        return { success: false, message: "Citizen not found" };
+        throw new Error("Citizen not found");
       }
 
       // Soft delete
-      citizen.deletedAt = new Date();
-      if (deletedBy) {
-        citizen.updatedBy = new mongoose.Types.ObjectId(deletedBy);
-      }
-      await citizen.save({ session });
+      await tx.citizen.updateMany({
+        where: { id },
+        data: {
+          deletedAt: new Date(),
+          updatedById: deletedBy,
+        },
+      });
 
       // Log audit
-      if (deletedBy) {
-        await AuditLog.log({
-          user: new mongoose.Types.ObjectId(deletedBy),
-          action: AuditAction.SOFT_DELETE,
-          entityType: EntityType.CITIZEN,
-          entityId: citizen._id,
-          entityName: citizen.name,
-          description: `Citizen deleted: ${citizen.name} (${citizen.registrationNo})`,
-          severity: Severity.MEDIUM,
+      if (deletedBy && isValidObjectId(deletedBy)) {
+        await tx.auditLog.create({
+          data: {
+            userId: deletedBy,
+            action: "SOFT_DELETE",
+            entityType: "CITIZEN",
+            entityId: citizen.id,
+            entityName: citizen.name,
+            description: `Citizen deleted: ${citizen.name} (${citizen.registrationNo})`,
+            severity: "MEDIUM",
+          },
         });
       }
 
-      await session.commitTransaction();
-
       return { success: true, message: "Citizen deleted successfully" };
-    } catch (error) {
-      await session.abortTransaction();
-      throw error;
-    } finally {
-      session.endSession();
-    }
+    }).catch((error) => {
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : "Failed to delete citizen",
+      };
+    });
   }
 
   static async getStats(unionParishadId?: string): Promise<{
@@ -360,34 +423,45 @@ export class CitizenService {
     byGender: Record<string, number>;
     byStatus: Record<string, number>;
   }> {
-    await connectDB();
-
-    const filter: Record<string, unknown> = {};
+    const where: Prisma.CitizenWhereInput = { deletedAt: null };
     if (unionParishadId) {
-      filter.unionParishad = new mongoose.Types.ObjectId(unionParishadId);
+      where.unionParishadId = unionParishadId;
     }
 
-    const [total, byWard, byGender, byStatus] = await Promise.all([
-      Citizen.countDocuments(filter),
-      Citizen.aggregate([
-        { $match: { ...filter, deletedAt: null } },
-        { $group: { _id: "$presentAddress.ward", count: { $sum: 1 } } },
-      ]),
-      Citizen.aggregate([
-        { $match: { ...filter, deletedAt: null } },
-        { $group: { _id: "$gender", count: { $sum: 1 } } },
-      ]),
-      Citizen.aggregate([
-        { $match: { ...filter, deletedAt: null } },
-        { $group: { _id: "$status", count: { $sum: 1 } } },
-      ]),
+    // For groupBy operations with composite types, we need raw aggregation
+    const [total, byGender, byStatus] = await Promise.all([
+      prisma.citizen.count({ where }),
+      prisma.citizen.groupBy({
+        by: ["gender"],
+        _count: true,
+        where,
+      }),
+      prisma.citizen.groupBy({
+        by: ["status"],
+        _count: true,
+        where,
+      }),
     ]);
+
+    // For ward aggregation on nested field, use raw query
+    const byWardResult = await prisma.$runCommandRaw({
+      aggregate: "citizens",
+      pipeline: [
+        { $match: { deletedAt: null, ...(unionParishadId ? { unionParishadId: { $oid: unionParishadId } } : {}) } },
+        { $group: { _id: "$presentAddress.ward", count: { $sum: 1 } } },
+      ],
+      cursor: {},
+    }) as { cursor: { firstBatch: Array<{ _id: number; count: number }> } };
+
+    const byWard = Object.fromEntries(
+      (byWardResult.cursor?.firstBatch || []).map((w) => [w._id, w.count])
+    );
 
     return {
       total,
-      byWard: Object.fromEntries(byWard.map((w) => [w._id, w.count])),
-      byGender: Object.fromEntries(byGender.map((g) => [g._id, g.count])),
-      byStatus: Object.fromEntries(byStatus.map((s) => [s._id, s.count])),
+      byWard,
+      byGender: Object.fromEntries(byGender.map((g) => [g.gender, g._count])),
+      byStatus: Object.fromEntries(byStatus.map((s) => [s.status, s._count])),
     };
   }
 }

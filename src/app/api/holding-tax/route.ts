@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { HoldingTaxService } from "@/services/holding-tax.service";
+import { HoldingTaxService, PaymentMethod } from "@/services/holding-tax.service";
 import { checkHoldingTax } from "@/server-middleware/holding-tax.middleware";
 import { verifyToken, getTokenFromHeader } from "@/lib/auth";
-import { PaymentMethod } from "@/models";
 
 const getHandler = async (request: NextRequest) => {
   try {

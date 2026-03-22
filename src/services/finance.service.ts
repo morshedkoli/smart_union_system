@@ -1,13 +1,19 @@
-import mongoose from "mongoose";
-import { connectDB } from "@/lib/mongodb";
+import prisma from "@/lib/db";
 import {
-  Cashbook,
-  EntryStatus,
-  PaymentMode,
-  TransactionCategory,
+  generateCashbookEntryNo,
+  isValidObjectId,
+} from "@/lib/prisma-utils";
+import { calculateClosingBalance } from "@/lib/prisma-virtuals";
+import {
   TransactionType,
-  type ICashbook,
-} from "@/models";
+  TransactionCategory,
+  PaymentMode,
+  EntryStatus,
+  type Cashbook,
+} from "@prisma/client";
+
+// Re-export enums for external use
+export { TransactionType, TransactionCategory, PaymentMode, EntryStatus };
 
 interface FinanceFilters {
   query?: string;
@@ -43,13 +49,6 @@ interface CreateTransactionData {
   remarks?: string;
 }
 
-function toObjectId(userId?: string): mongoose.Types.ObjectId | undefined {
-  if (userId && mongoose.Types.ObjectId.isValid(userId)) {
-    return new mongoose.Types.ObjectId(userId);
-  }
-  return undefined;
-}
-
 function getFiscalYear(date: Date): string {
   const year = date.getFullYear();
   const month = date.getMonth() + 1;
@@ -64,9 +63,34 @@ function escapeCsv(value: string | number | null | undefined): string {
   return `"${normalized.replace(/"/g, '""')}"`;
 }
 
+/**
+ * Local audit logging function for finance operations
+ */
+async function logAudit(
+  action: string,
+  entityType: string,
+  entityId: string,
+  userId?: string,
+  details?: Record<string, unknown>
+): Promise<void> {
+  try {
+    // Log to console in development
+    if (process.env.NODE_ENV === "development") {
+      console.log(`[AUDIT] ${action} on ${entityType}:${entityId}`, {
+        userId,
+        details,
+        timestamp: new Date().toISOString(),
+      });
+    }
+    // In production, you might want to write to an audit log collection
+  } catch (error) {
+    console.error("Failed to log audit:", error);
+  }
+}
+
 export class FinanceService {
   static async listTransactions(filters: FinanceFilters = {}): Promise<{
-    entries: ICashbook[];
+    entries: Cashbook[];
     total: number;
     page: number;
     totalPages: number;
@@ -76,8 +100,6 @@ export class FinanceService {
       balance: number;
     };
   }> {
-    await connectDB();
-
     const {
       query,
       transactionType,
@@ -88,42 +110,87 @@ export class FinanceService {
       limit = 20,
     } = filters;
 
-    const match: Record<string, unknown> = {};
+    const skip = (page - 1) * limit;
+
+    // Build where clause for Prisma
+    const where: {
+      OR?: Array<Record<string, { contains: string; mode: "insensitive" }>>;
+      transactionType?: TransactionType;
+      category?: TransactionCategory;
+      transactionDate?: { gte?: Date; lte?: Date };
+      deletedAt?: null;
+    } = {
+      deletedAt: null,
+    };
 
     if (query) {
-      match.$or = [
-        { voucherNo: { $regex: query, $options: "i" } },
-        { description: { $regex: query, $options: "i" } },
-        { referenceNo: { $regex: query, $options: "i" } },
-        { paidTo: { $regex: query, $options: "i" } },
-        { receivedFrom: { $regex: query, $options: "i" } },
+      where.OR = [
+        { voucherNo: { contains: query, mode: "insensitive" } },
+        { description: { contains: query, mode: "insensitive" } },
+        { referenceNo: { contains: query, mode: "insensitive" } },
+        { paidTo: { contains: query, mode: "insensitive" } },
+        { receivedFrom: { contains: query, mode: "insensitive" } },
       ];
     }
     if (transactionType) {
-      match.transactionType = transactionType;
+      where.transactionType = transactionType;
     }
     if (category) {
-      match.category = category;
+      where.category = category;
     }
     if (fromDate || toDate) {
-      match.transactionDate = {};
+      where.transactionDate = {};
       if (fromDate) {
-        (match.transactionDate as Record<string, unknown>).$gte = fromDate;
+        where.transactionDate.gte = fromDate;
       }
       if (toDate) {
-        (match.transactionDate as Record<string, unknown>).$lte = toDate;
+        where.transactionDate.lte = toDate;
       }
     }
 
-    const skip = (page - 1) * limit;
-    const [entries, total, aggregate] = await Promise.all([
-      Cashbook.find(match).sort({ transactionDate: -1, createdAt: -1 }).skip(skip).limit(limit).lean(),
-      Cashbook.countDocuments(match),
-      Cashbook.aggregate([
-        { $match: { ...match, status: EntryStatus.APPROVED, deletedAt: null } },
-        { $group: { _id: "$transactionType", total: { $sum: "$amount" } } },
-      ]),
+    // Execute queries in parallel
+    const [entries, total, aggregateResult] = await Promise.all([
+      prisma.cashbook.findMany({
+        where,
+        orderBy: [{ transactionDate: "desc" }, { createdAt: "desc" }],
+        skip,
+        take: limit,
+      }),
+      prisma.cashbook.count({ where }),
+      // Use MongoDB aggregation for summary calculation
+      prisma.$runCommandRaw({
+        aggregate: "cashbooks",
+        pipeline: [
+          {
+            $match: {
+              status: EntryStatus.APPROVED,
+              deletedAt: null,
+              ...(transactionType && { transactionType }),
+              ...(category && { category }),
+              ...(fromDate || toDate
+                ? {
+                    transactionDate: {
+                      ...(fromDate && { $gte: { $date: fromDate.toISOString() } }),
+                      ...(toDate && { $lte: { $date: toDate.toISOString() } }),
+                    },
+                  }
+                : {}),
+            },
+          },
+          {
+            $group: {
+              _id: "$transactionType",
+              total: { $sum: "$amount" },
+            },
+          },
+        ],
+        cursor: {},
+      }),
     ]);
+
+    // Parse aggregation result
+    const aggregate = (aggregateResult as { cursor?: { firstBatch?: Array<{ _id: string; total: number }> } })
+      ?.cursor?.firstBatch || [];
 
     const income =
       aggregate.find((item: { _id: string; total: number }) => item._id === TransactionType.INCOME)
@@ -133,7 +200,7 @@ export class FinanceService {
         ?.total || 0;
 
     return {
-      entries: entries as ICashbook[],
+      entries,
       total,
       page,
       totalPages: Math.ceil(total / limit),
@@ -148,9 +215,7 @@ export class FinanceService {
   static async createTransaction(
     data: CreateTransactionData,
     userId?: string
-  ): Promise<{ success: boolean; entry?: ICashbook; message: string }> {
-    await connectDB();
-
+  ): Promise<{ success: boolean; entry?: Cashbook; message: string }> {
     if (data.amount <= 0) {
       return { success: false, message: "Amount must be greater than zero" };
     }
@@ -161,71 +226,93 @@ export class FinanceService {
     const dayEnd = new Date(data.transactionDate);
     dayEnd.setHours(23, 59, 59, 999);
 
-    const duplicate = await Cashbook.findOne({
-      voucherNo: data.voucherNo,
-      fiscalYear,
-      transactionType: data.transactionType,
-      amount: data.amount,
-      transactionDate: { $gte: dayStart, $lte: dayEnd },
-      deletedAt: null,
-    }).lean();
+    // Check for duplicate transaction
+    const duplicate = await prisma.cashbook.findFirst({
+      where: {
+        voucherNo: data.voucherNo,
+        fiscalYear,
+        transactionType: data.transactionType,
+        amount: data.amount,
+        transactionDate: { gte: dayStart, lte: dayEnd },
+        deletedAt: null,
+      },
+    });
+
     if (duplicate) {
       return { success: false, message: "Duplicate transaction detected for this voucher/date" };
     }
 
-    const entryNo = await (
-      Cashbook as typeof Cashbook & {
-        generateEntryNo: (fy: string, type: TransactionType) => Promise<string>;
-      }
-    ).generateEntryNo(fiscalYear, data.transactionType);
+    // Use transaction for atomic operations
+    const entry = await prisma.$transaction(async (tx) => {
+      // Generate entry number
+      const entryNo = await generateCashbookEntryNo(tx, fiscalYear, data.transactionType);
 
-    const previousEntry = await Cashbook.findOne({
-      transactionDate: { $lte: data.transactionDate },
-      status: EntryStatus.APPROVED,
-      deletedAt: null,
-    })
-      .sort({ transactionDate: -1, createdAt: -1 })
-      .lean();
+      // Get previous entry for opening balance
+      const previousEntry = await tx.cashbook.findFirst({
+        where: {
+          transactionDate: { lte: data.transactionDate },
+          status: EntryStatus.APPROVED,
+          deletedAt: null,
+        },
+        orderBy: [{ transactionDate: "desc" }, { createdAt: "desc" }],
+      });
 
-    const openingBalance = previousEntry?.closingBalance || 0;
-    const objectUserId = toObjectId(userId);
+      const openingBalance = previousEntry?.closingBalance || 0;
+      const closingBalance = calculateClosingBalance(
+        openingBalance,
+        data.amount,
+        data.transactionType
+      );
 
-    const entry = await Cashbook.create({
-      entryNo,
-      voucherNo: data.voucherNo,
-      transactionDate: data.transactionDate,
-      transactionType: data.transactionType,
-      category: data.category,
-      subCategory: data.subCategory,
-      description: data.description,
-      descriptionBn: data.descriptionBn,
-      amount: data.amount,
-      paymentMode: data.paymentMode,
-      referenceNo: data.referenceNo,
-      referenceType: data.referenceType,
-      paidTo: data.paidTo,
-      receivedFrom: data.receivedFrom,
-      bankName: data.bankName,
-      bankAccount: data.bankAccount,
-      chequeNo: data.chequeNo,
-      chequeDate: data.chequeDate,
-      transactionId: data.transactionId,
-      fiscalYear,
-      budgetHead: data.budgetHead,
-      projectCode: data.projectCode,
-      openingBalance,
-      closingBalance: openingBalance,
-      status: EntryStatus.APPROVED,
-      approvedAt: new Date(),
-      approvedBy: objectUserId,
-      remarks: data.remarks,
-      createdBy: objectUserId,
-      updatedBy: objectUserId,
+      // Create the cashbook entry
+      const newEntry = await tx.cashbook.create({
+        data: {
+          entryNo,
+          voucherNo: data.voucherNo,
+          transactionDate: data.transactionDate,
+          transactionType: data.transactionType,
+          category: data.category,
+          subCategory: data.subCategory,
+          description: data.description,
+          descriptionBn: data.descriptionBn,
+          amount: data.amount,
+          paymentMode: data.paymentMode,
+          referenceNo: data.referenceNo,
+          referenceType: data.referenceType,
+          paidTo: data.paidTo,
+          receivedFrom: data.receivedFrom,
+          bankName: data.bankName,
+          bankAccount: data.bankAccount,
+          chequeNo: data.chequeNo,
+          chequeDate: data.chequeDate,
+          transactionId: data.transactionId,
+          fiscalYear,
+          budgetHead: data.budgetHead,
+          projectCode: data.projectCode,
+          openingBalance,
+          closingBalance,
+          status: EntryStatus.APPROVED,
+          approvedAt: new Date(),
+          approvedById: userId && isValidObjectId(userId) ? userId : undefined,
+          remarks: data.remarks,
+          createdById: userId && isValidObjectId(userId) ? userId : undefined,
+          updatedById: userId && isValidObjectId(userId) ? userId : undefined,
+        },
+      });
+
+      return newEntry;
+    });
+
+    // Log audit
+    await logAudit("CREATE_TRANSACTION", "cashbook", entry.id, userId, {
+      entryNo: entry.entryNo,
+      amount: entry.amount,
+      transactionType: entry.transactionType,
     });
 
     return {
       success: true,
-      entry: entry.toObject() as ICashbook,
+      entry,
       message: "Transaction added to cashbook",
     };
   }
@@ -234,40 +321,51 @@ export class FinanceService {
     date: string;
     totals: { income: number; expense: number; balance: number };
     byCategory: Array<{ category: string; income: number; expense: number }>;
-    entries: ICashbook[];
+    entries: Cashbook[];
   }> {
-    await connectDB();
     const start = new Date(date);
     start.setHours(0, 0, 0, 0);
     const end = new Date(date);
     end.setHours(23, 59, 59, 999);
 
-    const [entries, aggregate] = await Promise.all([
-      Cashbook.find({
-        transactionDate: { $gte: start, $lte: end },
-        status: EntryStatus.APPROVED,
-      })
-        .sort({ transactionDate: -1, createdAt: -1 })
-        .lean(),
-      Cashbook.aggregate([
-        {
-          $match: {
-            transactionDate: { $gte: start, $lte: end },
-            status: EntryStatus.APPROVED,
-            deletedAt: null,
-          },
+    const [entries, aggregateResult] = await Promise.all([
+      prisma.cashbook.findMany({
+        where: {
+          transactionDate: { gte: start, lte: end },
+          status: EntryStatus.APPROVED,
+          deletedAt: null,
         },
-        {
-          $group: {
-            _id: {
-              type: "$transactionType",
-              category: "$category",
+        orderBy: [{ transactionDate: "desc" }, { createdAt: "desc" }],
+      }),
+      prisma.$runCommandRaw({
+        aggregate: "cashbooks",
+        pipeline: [
+          {
+            $match: {
+              transactionDate: {
+                $gte: { $date: start.toISOString() },
+                $lte: { $date: end.toISOString() },
+              },
+              status: EntryStatus.APPROVED,
+              deletedAt: null,
             },
-            total: { $sum: "$amount" },
           },
-        },
-      ]),
+          {
+            $group: {
+              _id: {
+                type: "$transactionType",
+                category: "$category",
+              },
+              total: { $sum: "$amount" },
+            },
+          },
+        ],
+        cursor: {},
+      }),
     ]);
+
+    const aggregate = (aggregateResult as { cursor?: { firstBatch?: Array<{ _id: { type: TransactionType; category: string }; total: number }> } })
+      ?.cursor?.firstBatch || [];
 
     const categoryMap = new Map<string, { category: string; income: number; expense: number }>();
     let income = 0;
@@ -298,7 +396,7 @@ export class FinanceService {
       byCategory: Array.from(categoryMap.values()).sort(
         (a, b) => b.income + b.expense - (a.income + a.expense)
       ),
-      entries: entries as ICashbook[],
+      entries,
     };
   }
 
@@ -309,48 +407,66 @@ export class FinanceService {
     trend: Array<{ day: number; income: number; expense: number; balance: number }>;
     byCategory: Array<{ category: string; income: number; expense: number }>;
   }> {
-    await connectDB();
     const start = new Date(year, month - 1, 1, 0, 0, 0, 0);
     const end = new Date(year, month, 0, 23, 59, 59, 999);
 
-    const [dailyAgg, categoryAgg] = await Promise.all([
-      Cashbook.aggregate([
-        {
-          $match: {
-            transactionDate: { $gte: start, $lte: end },
-            status: EntryStatus.APPROVED,
-            deletedAt: null,
-          },
-        },
-        {
-          $group: {
-            _id: {
-              day: { $dayOfMonth: "$transactionDate" },
-              type: "$transactionType",
+    const [dailyAggResult, categoryAggResult] = await Promise.all([
+      prisma.$runCommandRaw({
+        aggregate: "cashbooks",
+        pipeline: [
+          {
+            $match: {
+              transactionDate: {
+                $gte: { $date: start.toISOString() },
+                $lte: { $date: end.toISOString() },
+              },
+              status: EntryStatus.APPROVED,
+              deletedAt: null,
             },
-            total: { $sum: "$amount" },
           },
-        },
-      ]),
-      Cashbook.aggregate([
-        {
-          $match: {
-            transactionDate: { $gte: start, $lte: end },
-            status: EntryStatus.APPROVED,
-            deletedAt: null,
-          },
-        },
-        {
-          $group: {
-            _id: {
-              category: "$category",
-              type: "$transactionType",
+          {
+            $group: {
+              _id: {
+                day: { $dayOfMonth: "$transactionDate" },
+                type: "$transactionType",
+              },
+              total: { $sum: "$amount" },
             },
-            total: { $sum: "$amount" },
           },
-        },
-      ]),
+        ],
+        cursor: {},
+      }),
+      prisma.$runCommandRaw({
+        aggregate: "cashbooks",
+        pipeline: [
+          {
+            $match: {
+              transactionDate: {
+                $gte: { $date: start.toISOString() },
+                $lte: { $date: end.toISOString() },
+              },
+              status: EntryStatus.APPROVED,
+              deletedAt: null,
+            },
+          },
+          {
+            $group: {
+              _id: {
+                category: "$category",
+                type: "$transactionType",
+              },
+              total: { $sum: "$amount" },
+            },
+          },
+        ],
+        cursor: {},
+      }),
     ]);
+
+    const dailyAgg = (dailyAggResult as { cursor?: { firstBatch?: Array<{ _id: { day: number; type: TransactionType }; total: number }> } })
+      ?.cursor?.firstBatch || [];
+    const categoryAgg = (categoryAggResult as { cursor?: { firstBatch?: Array<{ _id: { category: string; type: TransactionType }; total: number }> } })
+      ?.cursor?.firstBatch || [];
 
     const daysInMonth = end.getDate();
     const trendMap = new Map<number, { day: number; income: number; expense: number; balance: number }>();
@@ -405,7 +521,7 @@ export class FinanceService {
     };
   }
 
-  static buildCsvFromTransactions(entries: ICashbook[]): string {
+  static buildCsvFromTransactions(entries: Cashbook[]): string {
     const headers = [
       "Date",
       "Entry No",
@@ -470,4 +586,3 @@ export class FinanceService {
     return `${summary.join("\n")}\n${trendRows.join("\n")}\n${categoryTitle.join("\n")}\n${categoryRows.join("\n")}`;
   }
 }
-

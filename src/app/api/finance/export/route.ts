@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { TransactionCategory, TransactionType } from "@/models";
+import { TransactionCategory, TransactionType } from "@prisma/client";
 import { FinanceService } from "@/services";
 
 export async function GET(request: NextRequest) {
@@ -37,4 +37,3 @@ export async function GET(request: NextRequest) {
     );
   }
 }
-

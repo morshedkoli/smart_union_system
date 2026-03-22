@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { BeneficiaryStatus } from "@/models";
+import { BeneficiaryStatus } from "@prisma/client";
 import { getTokenFromHeader, verifyToken } from "@/lib/auth";
 import { ReliefService } from "@/services";
 
@@ -69,4 +69,3 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     );
   }
 }
-

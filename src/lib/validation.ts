@@ -1,16 +1,48 @@
 import { z } from "zod";
-import mongoose from "mongoose";
-import { CertificateType, CertificateStatus } from "@/models/Certificate";
-import { Gender, MaritalStatus, CitizenStatus } from "@/models/Citizen";
-import { HoldingType, BuildingType, PaymentMethod, PaymentStatus } from "@/models/HoldingTax";
-import { ReliefType, ProgramStatus, FundingSource } from "@/models/ReliefProgram";
-import { BeneficiaryStatus, DistributionStatus } from "@/models/Beneficiary";
-import { TransactionType, TransactionCategory, PaymentMode, EntryStatus } from "@/models/Cashbook";
-import { UserRole, UserStatus } from "@/models/User";
+import { isValidObjectId } from "@/lib/prisma-utils";
+import {
+  CertificateType,
+  Gender,
+  MaritalStatus,
+  HoldingType,
+  BuildingType,
+  PaymentMethod,
+  HoldingTaxPaymentStatus,
+  ReliefType,
+  FundingSource,
+  BeneficiaryStatus,
+  DistributionStatus,
+  TransactionType,
+  TransactionCategory,
+  PaymentMode,
+  Role,
+} from "@prisma/client";
+
+// Re-export enums for backward compatibility
+export {
+  CertificateType,
+  Gender,
+  MaritalStatus,
+  HoldingType,
+  BuildingType,
+  PaymentMethod,
+  ReliefType,
+  FundingSource,
+  BeneficiaryStatus,
+  DistributionStatus,
+  TransactionType,
+  TransactionCategory,
+  PaymentMode,
+  Role as UserRole,
+};
+
+// Alias for PaymentStatus
+export const PaymentStatus = HoldingTaxPaymentStatus;
+export type PaymentStatus = HoldingTaxPaymentStatus;
 
 // Helper to validate MongoDB ObjectId
 export const objectIdSchema = z.string().refine(
-  (val) => mongoose.Types.ObjectId.isValid(val),
+  (val) => isValidObjectId(val),
   { message: "Invalid ObjectId" }
 );
 
@@ -42,7 +74,7 @@ export const registerSchema = z.object({
   password: z.string().min(8, "Password must be at least 8 characters"),
   name: z.string().min(2, "Name must be at least 2 characters").max(100),
   phone: z.string().regex(/^(?:\+?880|0)?1[3-9]\d{8}$/, "Invalid Bangladesh mobile number").optional(),
-  role: z.nativeEnum(UserRole).optional(),
+  role: z.nativeEnum(Role).optional(),
 });
 
 export const changePasswordSchema = z.object({
@@ -170,7 +202,7 @@ export const createBeneficiarySchema = z.object({
 });
 
 export const reviewBeneficiarySchema = z.object({
-  status: z.enum([BeneficiaryStatus.VERIFIED, BeneficiaryStatus.REJECTED]),
+  status: z.enum(["VERIFIED", "REJECTED"] as const),
   note: z.string().optional(),
 });
 

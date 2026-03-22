@@ -40,6 +40,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { useAuth } from "@/components/providers/auth-provider";
 
 interface Citizen {
   _id: string;
@@ -64,6 +65,29 @@ interface CitizensContentProps {
 export function CitizensContent({ locale }: CitizensContentProps) {
   const t = useTranslations();
   const router = useRouter();
+  const { user } = useAuth();
+
+  // Role check - only SECRETARY and ENTREPRENEUR can access
+  if (!user || !["SECRETARY", "ENTREPRENEUR"].includes(user.role)) {
+    return (
+      <DashboardLayout>
+        <div className="space-y-6">
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight">
+              {locale === "bn" ? "নাগরিক ব্যবস্থাপনা" : "Citizens Management"}
+            </h1>
+          </div>
+          <Card>
+            <CardContent className="pt-6">
+              <div className="text-center text-muted-foreground">
+                <p>{locale === "bn" ? "অ্যাক্সেস অস্বীকৃত - অনুমোদিত ব্যবহারকারীদের জন্য" : "Access Denied - Authorized Users Only"}</p>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      </DashboardLayout>
+    );
+  }
 
   const [citizens, setCitizens] = useState<Citizen[]>([]);
   const [loading, setLoading] = useState(true);

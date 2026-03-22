@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { CitizenService } from "@/services/citizen.service";
-import { CitizenStatus, Gender } from "@/models";
+import { CitizenStatus, Gender } from "@prisma/client";
 
 export async function GET(request: NextRequest) {
   try {

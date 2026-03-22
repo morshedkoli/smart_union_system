@@ -2,13 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { CitizenService } from "@/services/citizen.service";
 
 interface RouteParams {
-  params: Promise<{ id: string }>;
+  params: Promise<{ citizenId: string }>;
 }
 
 export async function GET(request: NextRequest, { params }: RouteParams) {
   try {
-    const { id } = await params;
-    const citizen = await CitizenService.getById(id);
+    const { citizenId } = await params;
+    const citizen = await CitizenService.getById(citizenId);
 
     if (!citizen) {
       return NextResponse.json(
@@ -32,10 +32,10 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
 
 export async function PUT(request: NextRequest, { params }: RouteParams) {
   try {
-    const { id } = await params;
+    const { citizenId } = await params;
     const body = await request.json();
 
-    const result = await CitizenService.update(id, body);
+    const result = await CitizenService.update(citizenId, body);
 
     if (!result.success) {
       return NextResponse.json(result, { status: 400 });
@@ -53,8 +53,8 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
 
 export async function DELETE(request: NextRequest, { params }: RouteParams) {
   try {
-    const { id } = await params;
-    const result = await CitizenService.delete(id);
+    const { citizenId } = await params;
+    const result = await CitizenService.delete(citizenId);
 
     if (!result.success) {
       return NextResponse.json(result, { status: 400 });

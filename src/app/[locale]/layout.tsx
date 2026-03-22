@@ -6,7 +6,6 @@ import { notFound } from "next/navigation";
 import { ThemeProvider } from "@/components/providers/theme-provider";
 import { AuthProvider } from "@/components/providers/auth-provider";
 import { routing } from "@/i18n/routing";
-import "../globals.css";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -47,23 +46,19 @@ export default async function LocaleLayout({
   const messages = await getMessages();
 
   return (
-    <html lang={locale} suppressHydrationWarning>
-      <body
-        className={`${inter.variable} ${notoBengali.variable} font-sans antialiased`}
+    <div className={`${inter.variable} ${notoBengali.variable} font-sans antialiased`}>
+      <ThemeProvider
+        attribute="class"
+        defaultTheme="system"
+        enableSystem
+        disableTransitionOnChange
       >
-        <ThemeProvider
-          attribute="class"
-          defaultTheme="system"
-          enableSystem
-          disableTransitionOnChange
-        >
-          <NextIntlClientProvider messages={messages}>
-            <AuthProvider locale={locale}>
-              {children}
-            </AuthProvider>
-          </NextIntlClientProvider>
-        </ThemeProvider>
-      </body>
-    </html>
+        <NextIntlClientProvider messages={messages}>
+          <AuthProvider locale={locale}>
+            {children}
+          </AuthProvider>
+        </NextIntlClientProvider>
+      </ThemeProvider>
+    </div>
   );
 }

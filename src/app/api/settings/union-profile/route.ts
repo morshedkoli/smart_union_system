@@ -4,7 +4,7 @@ import { SettingsService } from "@/services";
 
 async function resolveAuth(request: NextRequest): Promise<{
   userId: string;
-  role: "SUPER_ADMIN" | "ADMIN" | "OPERATOR" | "VIEWER";
+  role: "SECRETARY" | "ENTREPRENEUR" | "CITIZEN";
 } | null> {
   const cookieToken = request.cookies.get("auth-token")?.value;
   const headerToken = getTokenFromHeader(request.headers.get("authorization"));
@@ -18,14 +18,14 @@ async function resolveAuth(request: NextRequest): Promise<{
   };
 }
 
-function isAdmin(role: string): boolean {
-  return role === "SUPER_ADMIN" || role === "ADMIN";
+function isSecretary(role: string): boolean {
+  return role === "SECRETARY"; // SECRETARY is the super admin
 }
 
 export async function GET(request: NextRequest) {
   try {
     const auth = await resolveAuth(request);
-    if (!auth || !isAdmin(auth.role)) {
+    if (!auth || !isSecretary(auth.role)) {
       return NextResponse.json(
         { success: false, message: "Unauthorized" },
         { status: 401 }
@@ -46,7 +46,7 @@ export async function GET(request: NextRequest) {
 export async function PUT(request: NextRequest) {
   try {
     const auth = await resolveAuth(request);
-    if (!auth || !isAdmin(auth.role)) {
+    if (!auth || !isSecretary(auth.role)) {
       return NextResponse.json(
         { success: false, message: "Unauthorized" },
         { status: 401 }

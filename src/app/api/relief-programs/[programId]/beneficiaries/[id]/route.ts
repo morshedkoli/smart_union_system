@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { BeneficiaryStatus } from "@/models";
+import { BeneficiaryStatus } from "@prisma/client";
 import { getTokenFromHeader, verifyToken } from "@/lib/auth";
 import { ReliefService } from "@/services";
 
@@ -32,7 +32,8 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
 
     if (body.action === "review") {
       const status = body.status as BeneficiaryStatus;
-      if (![BeneficiaryStatus.VERIFIED, BeneficiaryStatus.REJECTED].includes(status)) {
+      const validStatuses: BeneficiaryStatus[] = ["VERIFIED", "REJECTED"];
+      if (!validStatuses.includes(status)) {
         return NextResponse.json(
           { success: false, message: "Invalid review status" },
           { status: 400 }
@@ -41,7 +42,7 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
       const result = await ReliefService.reviewBeneficiary(
         id,
         {
-          status: status as BeneficiaryStatus.VERIFIED | BeneficiaryStatus.REJECTED,
+          status: status as typeof BeneficiaryStatus.VERIFIED | typeof BeneficiaryStatus.REJECTED,
           note: body.note,
         },
         userId
@@ -64,4 +65,3 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
     );
   }
 }
-
