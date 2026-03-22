@@ -1,0 +1,264 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// User and Authentication
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  password      String
+  name          String
+  nameEn        String?
+  nameBn        String?
+  phone         String?
+  role          Role      @default(OPERATOR)
+  status        Status    @default(ACTIVE)
+  lastLoginAt   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  deletedAt     DateTime?
+
+  auditLogs     AuditLog[]
+  certificates  Certificate[] @relation("IssuedBy")
+
+  @@map("users")
+}
+
+enum Role {
+  SUPER_ADMIN
+  ADMIN
+  OPERATOR
+  VIEWER
+}
+
+enum Status {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
+
+// Citizens
+model Citizen {
+  id              String    @id @default(cuid())
+  nid             String?   @unique
+  birthCertNo     String?   @unique
+  name            String
+  nameEn          String?
+  nameBn          String
+  fatherName      String
+  fatherNameBn    String?
+  motherName      String
+  motherNameBn    String?
+  dateOfBirth     DateTime
+  gender          Gender
+  religion        String?
+  maritalStatus   MaritalStatus @default(SINGLE)
+  occupation      String?
+  phone           String?
+  email           String?
+  presentAddress  String
+  permanentAddress String
+  wardNo          Int
+  holdingNo       String?
+  photo           String?
+  status          Status    @default(ACTIVE)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  deletedAt       DateTime?
+
+  certificates    Certificate[]
+  taxes           Tax[]
+  holdings        Holding[]
+
+  @@map("citizens")
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+enum MaritalStatus {
+  SINGLE
+  MARRIED
+  DIVORCED
+  WIDOWED
+}
+
+// Holdings for Tax
+model Holding {
+  id              String    @id @default(cuid())
+  holdingNo       String    @unique
+  citizenId       String
+  citizen         Citizen   @relation(fields: [citizenId], references: [id])
+  wardNo          Int
+  mouza           String?
+  jlNo            String?
+  plot            String?
+  area            Float?
+  landType        String?
+  buildingType    String?
+  assessedValue   Float     @default(0)
+  annualTax       Float     @default(0)
+  status          Status    @default(ACTIVE)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  deletedAt       DateTime?
+
+  taxes           Tax[]
+
+  @@map("holdings")
+}
+
+// Certificates
+model Certificate {
+  id              String          @id @default(cuid())
+  certificateNo   String          @unique
+  type            CertificateType
+  citizenId       String
+  citizen         Citizen         @relation(fields: [citizenId], references: [id])
+  issuedById      String
+  issuedBy        User            @relation("IssuedBy", fields: [issuedById], references: [id])
+  issuedAt        DateTime        @default(now())
+  validUntil      DateTime?
+  status          CertificateStatus @default(PENDING)
+  approvedAt      DateTime?
+  approvedById    String?
+  rejectedAt      DateTime?
+  rejectionReason String?
+  qrCode          String?
+  metadata        String?         // JSON string for additional data
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  deletedAt       DateTime?
+
+  @@index([certificateNo])
+  @@index([citizenId])
+  @@map("certificates")
+}
+
+enum CertificateType {
+  BIRTH
+  DEATH
+  CITIZENSHIP
+  CHARACTER
+  INHERITORSHIP
+  TRADE_LICENSE
+  NOC
+}
+
+enum CertificateStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  REVOKED
+}
+
+// Taxes and Revenue
+model Tax {
+  id              String    @id @default(cuid())
+  receiptNo       String    @unique
+  type            TaxType
+  citizenId       String
+  citizen         Citizen   @relation(fields: [citizenId], references: [id])
+  holdingId       String?
+  holding         Holding?  @relation(fields: [holdingId], references: [id])
+  fiscalYear      String
+  amount          Float
+  arrears         Float     @default(0)
+  penalty         Float     @default(0)
+  totalAmount     Float
+  paidAmount      Float     @default(0)
+  dueDate         DateTime
+  paidAt          DateTime?
+  status          PaymentStatus @default(UNPAID)
+  paymentMethod   String?
+  transactionId   String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  deletedAt       DateTime?
+
+  @@index([receiptNo])
+  @@index([citizenId])
+  @@map("taxes")
+}
+
+enum TaxType {
+  HOLDING_TAX
+  TRADE_LICENSE_FEE
+  BIRTH_CERTIFICATE_FEE
+  DEATH_CERTIFICATE_FEE
+  OTHER_FEE
+}
+
+enum PaymentStatus {
+  UNPAID
+  PARTIAL
+  PAID
+  OVERDUE
+  WAIVED
+}
+
+// Audit Log
+model AuditLog {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id])
+  action      String
+  entityType  String
+  entityId    String
+  oldValue    String?
+  newValue    String?
+  ipAddress   String?
+  userAgent   String?
+  createdAt   DateTime  @default(now())
+
+  @@index([userId])
+  @@index([entityType, entityId])
+  @@map("audit_logs")
+}
+
+// Settings
+model Setting {
+  id          String    @id @default(cuid())
+  key         String    @unique
+  value       String
+  type        String    @default("string")
+  description String?
+  updatedAt   DateTime  @updatedAt
+
+  @@map("settings")
+}
+
+// Union Parishad Info
+model UnionParishad {
+  id              String    @id @default(cuid())
+  code            String    @unique
+  nameEn          String
+  nameBn          String
+  district        String
+  upazila         String
+  division        String
+  chairman        String?
+  chairmanPhone   String?
+  totalWards      Int       @default(9)
+  logo            String?
+  seal            String?
+  signatureChairman String?
+  signatureSecretary String?
+  address         String?
+  phone           String?
+  email           String?
+  website         String?
+
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@map("union_parishads")
+}

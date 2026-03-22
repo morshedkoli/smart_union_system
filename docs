@@ -1,0 +1,450 @@
+# 📄 PRODUCT REQUIREMENTS DOCUMENT (FINAL)
+
+## Smart Union Parishad Management System
+
+---
+
+# 🧠 1. OVERVIEW
+
+A full-stack web application to digitize operations of a single Union Parishad in Bangladesh.
+
+The system replaces manual processes with:
+
+* Digital citizen registry
+* Certificate generation system
+* Holding tax enforcement
+* Relief management
+* Financial tracking
+* Public verification
+
+---
+
+# 🎯 2. CORE OBJECTIVES
+
+* Digitize all union services
+* Enforce holding tax compliance
+* Prevent fraud (QR verification)
+* Improve operator efficiency
+* Enable transparent governance
+
+---
+
+# 👥 3. USER ROLES
+
+## Admin (Secretary)
+
+* Approve certificates
+* Manage users
+* Manage templates
+* Control system settings
+* View reports
+
+## Operator (Entrepreneur)
+
+* Create citizens
+* Issue services
+* Collect tax
+* Manage records
+
+## Citizen
+
+* View services
+* Download certificates
+* Track status
+
+---
+
+# 🧩 4. CORE FEATURES
+
+---
+
+## 4.1 Authentication
+
+* JWT-based authentication
+* bcrypt password hashing
+* Role-based access control
+* Permission system
+
+---
+
+## 4.2 Citizen Management
+
+* Full CRUD
+* Unique fields: NID, mobile
+* Fields:
+  name_bn, name_en, father_name, mother_name
+  address, ward_no, holding_no
+  income, occupation, landless, disability
+* Profile with tabs:
+  Info | Tax | Certificates | Relief
+
+---
+
+## 4.3 Holding Tax System (CRITICAL)
+
+* Yearly tax records
+* Unique: citizen_id + year
+* Tax receipt generation
+
+### Rules:
+
+* If tax unpaid:
+
+  * Block service application
+  * Block certificate printing
+* Admin can create but cannot print
+
+---
+
+## 4.4 Certificate System (CORE)
+
+### Template-Based Engine
+
+* Template with placeholders:
+  {{name}}, {{father_name}}
+
+### Workflow:
+
+Draft → Submitted → Approved → LOCKED
+
+### Rules:
+
+* Editable before approval
+* Immutable after approval
+* No delete (soft delete only)
+
+### Data:
+
+* reference_no (unique)
+* final_text
+* data_snapshot
+* pdf_url
+
+---
+
+## 4.5 Certificate Design (Government Style)
+
+* A4 layout
+* Header:
+  Government title + Union name
+* Body:
+  Bangla text
+* Footer:
+  Signature + QR + reference number
+* Watermark
+
+---
+
+## 4.6 QR Verification System
+
+* QR contains:
+  verification URL (/verify/[reference_no])
+
+### Public Page:
+
+* Show valid / invalid
+* Display summary
+
+---
+
+## 4.7 Relief Program System
+
+### Flow:
+
+Create → Criteria → Auto Generate → Review → Approve → LOCK
+
+### Features:
+
+* Criteria filtering:
+  income, ward, landless
+* Prevent duplicate beneficiaries
+
+---
+
+## 4.8 Financial System (Cashbook)
+
+* Track all income:
+  tax, certificate fees
+* Reports:
+  daily, monthly, operator-wise
+
+---
+
+## 4.9 Audit Log (CRITICAL)
+
+Track all actions:
+
+* user_id
+* action
+* target_id
+* timestamp
+* ip
+
+---
+
+## 4.10 Global Search
+
+Search across:
+
+* citizens
+* certificates
+* reference numbers
+
+---
+
+## 4.11 Excel Import/Export
+
+* Import citizens
+* Export reports
+
+---
+
+## 4.12 Notification System
+
+Alerts:
+
+* Tax unpaid
+* Pending approvals
+
+---
+
+## 4.13 Public Portal
+
+Citizen can:
+
+* Login
+* View certificates
+* Download PDF
+* Verify certificate
+
+---
+
+## 4.14 Print System
+
+* Print preview
+* Print history
+
+### Rule:
+
+* Block print if tax unpaid
+
+---
+
+## 4.15 Settings Panel
+
+Admin can configure:
+
+* Union name
+* Logo
+* Signature
+* Certificate format
+
+---
+
+# 🌐 5. UI/UX DESIGN SYSTEM
+
+---
+
+## Design Style
+
+* Government + Modern SaaS hybrid
+* Clean, minimal, professional
+
+---
+
+## Typography
+
+* Inter (English)
+* Noto Sans Bengali (Bangla)
+
+---
+
+## Colors
+
+* Primary: #166534 (green)
+* Background: #f8fafc / #0f172a
+* Cards: white / slate-800
+
+---
+
+## Components
+
+* Rounded-xl / rounded-2xl
+* Soft shadows
+* Clean tables
+* Minimal borders
+
+---
+
+## Layout
+
+* Sidebar + Header + Content
+* Responsive
+
+---
+
+## UX Principles
+
+* Auto-fill data
+* Minimal clicks
+* Clear status indicators
+
+---
+
+# 🧱 6. SYSTEM ARCHITECTURE
+
+---
+
+## Stack
+
+* Next.js (App Router)
+* MongoDB (Mongoose)
+* Tailwind CSS + ShadCN
+* next-intl
+* next-themes
+* JWT
+* Cloudinary
+* Puppeteer (PDF)
+* QR library
+
+---
+
+## Architecture Style
+
+* Modular Monolith
+
+---
+
+## Layers
+
+* Presentation (UI)
+* API Layer
+* Service Layer
+* Data Layer
+
+---
+
+# 🗂️ 7. DATABASE COLLECTIONS
+
+* users
+* citizens
+* holding_taxes
+* certificates
+* certificate_templates
+* relief_programs
+* beneficiaries
+* cashbook
+* audit_logs
+* notifications
+
+---
+
+# 🔐 8. SECURITY
+
+* JWT authentication
+* bcrypt hashing
+* Role middleware
+* Permission middleware
+* Tax enforcement middleware
+* Rate limiting
+* Soft delete
+
+---
+
+# 📄 9. PAGE STRUCTURE
+
+---
+
+## Auth
+
+* /login
+* /register
+
+## Dashboard
+
+* /dashboard
+
+## Citizen
+
+* /citizens
+* /citizens/create
+* /citizens/[id]
+
+## Tax
+
+* /tax
+* /tax/receipt
+
+## Certificate
+
+* /certificates
+* /certificates/create
+* /certificates/[id]
+
+## Template
+
+* /templates
+
+## Relief
+
+* /relief
+
+## Finance
+
+* /finance
+
+## Search
+
+* /search
+
+## Public
+
+* /verify/[reference_no]
+* /portal
+
+## Settings
+
+* /settings
+
+---
+
+# 🔄 10. CORE WORKFLOWS
+
+---
+
+## Certificate Flow
+
+Select Citizen → Auto Fill → Edit → Submit → Approve → LOCK → PDF + QR
+
+---
+
+## Tax Flow
+
+Add Tax → Mark Paid → Generate Receipt
+
+---
+
+## Relief Flow
+
+Create → Filter → Review → Approve → Lock
+
+---
+
+# ⚠️ 11. CRITICAL RULES
+
+* No edit after certificate approval
+* No delete (soft delete only)
+* Tax unpaid blocks service + print
+* Relief list immutable after approval
+
+---
+
+# 🚀 12. DEVELOPMENT PHASES
+
+1. Auth + Setup
+2. Citizen + Tax
+3. Certificate system
+4. QR + PDF
+5. Finance + Reports
+6. Relief system
+   7
