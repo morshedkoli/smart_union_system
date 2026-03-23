@@ -46,10 +46,39 @@ export const objectIdSchema = z.string().refine(
   { message: "Invalid ObjectId" }
 );
 
+const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+
+function parseDateInput(value: string): Date | null {
+  if (DATE_ONLY_REGEX.test(value)) {
+    const [year, month, day] = value.split("-").map(Number);
+    const date = new Date(Date.UTC(year, month - 1, day));
+
+    if (
+      date.getUTCFullYear() !== year ||
+      date.getUTCMonth() !== month - 1 ||
+      date.getUTCDate() !== day
+    ) {
+      return null;
+    }
+
+    return date;
+  }
+
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
 // Helper for dates
-export const dateSchema = z.union([z.date(), z.string().datetime()]).transform((val) =>
-  typeof val === "string" ? new Date(val) : val
-);
+export const dateSchema = z
+  .union([
+    z.date(),
+    z
+      .string()
+      .trim()
+      .min(1, "Date is required")
+      .refine((val) => parseDateInput(val) !== null, "Invalid date"),
+  ])
+  .transform((val) => (typeof val === "string" ? (parseDateInput(val) as Date) : val));
 
 // Address schema
 export const addressSchema = z.object({

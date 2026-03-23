@@ -43,6 +43,8 @@ export function getTokenFromHeader(
 }
 
 export function hasPermission(userRole: Role, requiredRoles: Role[]): boolean {
+  // SECRETARY has all permissions
+  if (userRole === "SECRETARY") return true;
   return requiredRoles.includes(userRole);
 }
 

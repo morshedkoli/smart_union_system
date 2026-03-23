@@ -103,8 +103,9 @@ export function MyCertificatesContent({ locale }: { locale: string }) {
       setLoading(true);
       setError("");
 
-      const res = await fetch(`/api/citizens/${user.citizenId}/certificates`, {
+      const res = await fetch(`/api/citizens/${user.citizenId}/certificates?ts=${Date.now()}`, {
         credentials: "include",
+        cache: "no-store"
       });
 
       const data = await res.json();

@@ -12,12 +12,15 @@ import type { CertificateType, ReliefType, TransactionType } from "@prisma/clien
 export async function generateCitizenRegistrationNo(
   prisma: {
     citizen: {
-      count: (args: {
+      findMany: (args: {
         where: {
           registrationNo: { startsWith: string };
-          deletedAt: null;
         };
-      }) => Promise<number>;
+        select: {
+          id: true;
+          deletedAt: true;
+        };
+      }) => Promise<Array<{ id: string; deletedAt: Date | null }>>;
     };
   },
   wardNo: number,
@@ -26,12 +29,20 @@ export async function generateCitizenRegistrationNo(
   const currentYear = year || new Date().getFullYear();
   const prefix = `CIT-${currentYear}-W${wardNo.toString().padStart(2, "0")}`;
 
-  const count = await prisma.citizen.count({
+  // Fetch all citizens with this prefix and filter in app layer
+  // MongoDB doesn't handle deletedAt: null properly in where clauses
+  const citizens = await prisma.citizen.findMany({
     where: {
       registrationNo: { startsWith: prefix },
-      deletedAt: null,
+    },
+    select: {
+      id: true,
+      deletedAt: true,
     },
   });
+
+  // Count only non-deleted citizens
+  const count = citizens.filter(c => !c.deletedAt).length;
 
   return `${prefix}-${(count + 1).toString().padStart(5, "0")}`;
 }
@@ -265,6 +276,30 @@ export async function generateDistributionNo(
  */
 export function isValidObjectId(id: string): boolean {
   return /^[0-9a-fA-F]{24}$/.test(id);
+}
+
+/**
+ * Generate identity hash for a citizen to prevent duplicate registration
+ * Uses name + father's name + date of birth as unique identifier
+ */
+export function generateCitizenIdentityHash(
+  name: string,
+  fatherName: string,
+  dateOfBirth: Date
+): string {
+  // Normalize the data: lowercase, trim, remove extra spaces
+  const normalizedName = name.toLowerCase().trim().replace(/\s+/g, " ");
+  const normalizedFatherName = fatherName.toLowerCase().trim().replace(/\s+/g, " ");
+  const dobString = new Date(dateOfBirth).toISOString().split("T")[0];
+
+  // Create a simple hash by combining and encoding
+  const combined = `${normalizedName}|${normalizedFatherName}|${dobString}`;
+
+  // Use a simple hash function (for Node.js, we can use Buffer or crypto)
+  // For simplicity, we'll use base64 encoding with a prefix
+  const hash = Buffer.from(combined, "utf-8").toString("base64");
+
+  return `IDENTITY_${hash}`;
 }
 
 /**

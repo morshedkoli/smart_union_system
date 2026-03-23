@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
+import { toast } from "sonner";
 import { ArrowLeft, Save, Loader2 } from "lucide-react";
 import { DashboardLayout } from "@/components/layout";
 import { Button } from "@/components/ui/button";
@@ -239,20 +240,43 @@ export function CitizenForm({ locale, initialData, isEdit = false }: CitizenForm
       const url = isEdit ? `/api/citizens/${citizenId}` : "/api/citizens";
       const method = isEdit ? "PUT" : "POST";
 
+      // Clean up empty optional fields to avoid validation issues
+      const cleanedData = {
+        ...formData,
+        nid: formData.nid?.trim() || undefined,
+        birthCertificateNo: formData.birthCertificateNo?.trim() || undefined,
+        nameEn: formData.nameEn?.trim() || undefined,
+        fatherNameBn: formData.fatherNameBn?.trim() || undefined,
+        motherNameBn: formData.motherNameBn?.trim() || undefined,
+        mobile: formData.mobile?.trim() || undefined,
+        email: formData.email?.trim() || undefined,
+        religion: formData.religion?.trim() || undefined,
+        occupation: formData.occupation?.trim() || undefined,
+        holdingNo: formData.holdingNo?.trim() || undefined,
+      };
+
       const res = await fetch(url, {
         method,
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(formData),
+        body: JSON.stringify(cleanedData),
       });
 
       const data = await res.json();
 
       if (data.success) {
+        toast.success(
+          isEdit
+            ? locale === "bn" ? "নাগরিক সফলভাবে আপডেট হয়েছে" : "Citizen updated successfully"
+            : locale === "bn" ? "নাগরিক সফলভাবে যোগ করা হয়েছে" : "Citizen added successfully"
+        );
         router.push(`/${locale}/dashboard/citizens`);
+        router.refresh();
       } else {
+        toast.error(data.message || "Failed to save citizen");
         setError(data.message || "Failed to save citizen");
       }
     } catch {
+      toast.error("An error occurred. Please try again.");
       setError("An error occurred. Please try again.");
     } finally {
       setLoading(false);

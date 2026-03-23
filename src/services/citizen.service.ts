@@ -1,7 +1,8 @@
 import { prisma } from "@/lib/db";
-import { generateCitizenRegistrationNo, isValidObjectId } from "@/lib/prisma-utils";
+import { generateCitizenRegistrationNo, generateCitizenIdentityHash, isValidObjectId } from "@/lib/prisma-utils";
 import { calculateAge } from "@/lib/prisma-virtuals";
 import { deepSanitize } from "@/lib/sanitize";
+import { dateSchema } from "@/lib/validation";
 import { Prisma } from "@prisma/client";
 import type { Citizen, Gender, MaritalStatus, CitizenStatus } from "@prisma/client";
 
@@ -60,10 +61,32 @@ export interface CitizenWithAge extends Citizen {
   age: number | null;
 }
 
+function normalizeCitizenDateOfBirth(value: unknown): Date {
+  const parsed = dateSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new Error(parsed.error.issues[0]?.message || "Invalid dateOfBirth");
+  }
+
+  return parsed.data;
+}
+
 function formatCitizenPersistenceError(error: unknown): string {
   if (error instanceof Prisma.PrismaClientKnownRequestError) {
     if (error.code === "P2002") {
-      return "A citizen with this unique information already exists";
+      const target = error.meta?.target as string[] | undefined;
+      if (target?.includes("identityHash")) {
+        return "এই নাম, পিতার নাম এবং জন্ম তারিখ দিয়ে ইতিমধ্যে একজন নাগরিক নিবন্ধিত আছে / A citizen with the same name, father's name and date of birth is already registered";
+      }
+      if (target?.includes("nid")) {
+        return "এই NID নম্বর দিয়ে ইতিমধ্যে একজন নাগরিক নিবন্ধিত আছে / A citizen with this NID is already registered";
+      }
+      if (target?.includes("birthCertificateNo")) {
+        return "এই জন্ম নিবন্ধন নম্বর দিয়ে ইতিমধ্যে একজন নাগরিক নিবন্ধিত আছে / A citizen with this birth certificate number is already registered";
+      }
+      if (target?.includes("mobile")) {
+        return "এই মোবাইল নম্বর দিয়ে ইতিমধ্যে একজন নাগরিক নিবন্ধিত আছে / A citizen with this mobile number is already registered";
+      }
+      return "এই তথ্য দিয়ে ইতিমধ্যে একজন নাগরিক নিবন্ধিত আছে / A citizen with this information is already registered";
     }
   }
 
@@ -127,47 +150,53 @@ export class CitizenService {
       sortOrder = "desc",
     } = params;
 
-    const where: Prisma.CitizenWhereInput = {
-      deletedAt: null,
-    };
-
-    if (query) {
-      where.OR = [
-        { name: { contains: query, mode: "insensitive" } },
-        { nameBn: { contains: query, mode: "insensitive" } },
-        { nid: { contains: query, mode: "insensitive" } },
-        { mobile: { contains: query, mode: "insensitive" } },
-        { registrationNo: { contains: query, mode: "insensitive" } },
-      ];
-    }
-
-    if (ward) {
-      where.presentAddress = { is: { ward } };
-    }
-
-    if (status) {
-      where.status = status;
-    }
-
-    if (gender) {
-      where.gender = gender;
-    }
-
     const skip = (page - 1) * limit;
-    const orderBy: Prisma.CitizenOrderByWithRelationInput = { [sortBy]: sortOrder };
 
-    const [citizens, total] = await Promise.all([
-      prisma.citizen.findMany({
-        where,
-        orderBy,
-        skip,
-        take: limit,
-      }),
-      prisma.citizen.count({ where }),
-    ]);
+    // Fetch ALL citizens first (no where clause to avoid MongoDB null issues)
+    const allCitizens = await prisma.citizen.findMany({
+      orderBy: { [sortBy]: sortOrder },
+    });
 
-    // Add computed age to each citizen
-    const citizensWithAge: CitizenWithAge[] = citizens.map((citizen) => ({
+    // Filter in application layer
+    let filtered = allCitizens.filter(c => {
+      // Exclude soft-deleted
+      if (c.deletedAt) return false;
+      
+      // Search query filter
+      if (query) {
+        const q = query.toLowerCase();
+        const matchesQuery = 
+          c.name?.toLowerCase().includes(q) ||
+          c.nameBn?.toLowerCase().includes(q) ||
+          c.nid?.toLowerCase().includes(q) ||
+          c.mobile?.toLowerCase().includes(q) ||
+          c.registrationNo?.toLowerCase().includes(q);
+        if (!matchesQuery) return false;
+      }
+
+      // Ward filter
+      if (ward) {
+        const citizenWard = (c.presentAddress as { ward?: number })?.ward;
+        if (citizenWard !== ward) return false;
+      }
+
+      // Status filter
+      if (status && c.status !== status) return false;
+
+      // Gender filter
+      if (gender && c.gender !== gender) return false;
+
+      return true;
+    });
+
+    const total = filtered.length;
+    const totalPages = Math.ceil(total / limit);
+
+    // Paginate
+    const paginated = filtered.slice(skip, skip + limit);
+
+    // Add computed age
+    const citizensWithAge: CitizenWithAge[] = paginated.map((citizen) => ({
       ...citizen,
       age: calculateAge(citizen.dateOfBirth),
     }));
@@ -176,7 +205,7 @@ export class CitizenService {
       citizens: citizensWithAge,
       total,
       page,
-      totalPages: Math.ceil(total / limit),
+      totalPages,
     };
   }
 
@@ -206,30 +235,77 @@ export class CitizenService {
 
   static async create(
     data: CitizenCreateData,
-    createdBy?: string
+    createdBy?: string,
+    creatorRole?: string
   ): Promise<{ success: boolean; citizen?: Citizen; message: string }> {
     // Sanitize input data
     const sanitizedData = deepSanitize(data);
     try {
+      const dateOfBirth = normalizeCitizenDateOfBirth(sanitizedData.dateOfBirth);
+
+      // Generate identity hash to prevent duplicate person registration
+      const identityHash = generateCitizenIdentityHash(
+        sanitizedData.name,
+        sanitizedData.fatherName,
+        dateOfBirth
+      );
+
+      // Check for duplicate NID
       if (sanitizedData.nid) {
-        const existingNid = await prisma.citizen.findFirst({
-          where: { nid: sanitizedData.nid, deletedAt: null },
+        const allWithNid = await prisma.citizen.findMany({
+          where: { nid: sanitizedData.nid },
+          select: { id: true, deletedAt: true },
         });
+        const existingNid = allWithNid.find(c => !c.deletedAt);
         if (existingNid) {
-          throw new Error("NID already registered");
+          return {
+            success: false,
+            message: "এই NID নম্বর দিয়ে ইতিমধ্যে একজন নাগরিক নিবন্ধিত আছে / A citizen with this NID is already registered",
+          };
         }
       }
 
+      // Check for duplicate Birth Certificate
       if (sanitizedData.birthCertificateNo) {
-        const existingBc = await prisma.citizen.findFirst({
-          where: {
-            birthCertificateNo: sanitizedData.birthCertificateNo,
-            deletedAt: null,
-          },
+        const allWithBc = await prisma.citizen.findMany({
+          where: { birthCertificateNo: sanitizedData.birthCertificateNo },
+          select: { id: true, deletedAt: true },
         });
+        const existingBc = allWithBc.find(c => !c.deletedAt);
         if (existingBc) {
-          throw new Error("Birth certificate number already registered");
+          return {
+            success: false,
+            message: "এই জন্ম নিবন্ধন নম্বর দিয়ে ইতিমধ্যে একজন নাগরিক নিবন্ধিত আছে / A citizen with this birth certificate number is already registered",
+          };
         }
+      }
+
+      // Check for duplicate mobile number
+      if (sanitizedData.mobile) {
+        const allWithMobile = await prisma.citizen.findMany({
+          where: { mobile: sanitizedData.mobile },
+          select: { id: true, deletedAt: true },
+        });
+        const existingMobile = allWithMobile.find(c => !c.deletedAt);
+        if (existingMobile) {
+          return {
+            success: false,
+            message: "এই মোবাইল নম্বর দিয়ে ইতিমধ্যে একজন নাগরিক নিবন্ধিত আছে / A citizen with this mobile number is already registered",
+          };
+        }
+      }
+
+      // Check for duplicate identity (name + father + DOB) using the hash
+      const allWithIdentity = await prisma.citizen.findMany({
+        where: { identityHash },
+        select: { id: true, name: true, deletedAt: true },
+      });
+      const existingIdentity = allWithIdentity.find(c => !c.deletedAt);
+      if (existingIdentity) {
+        return {
+          success: false,
+          message: "এই নাম, পিতার নাম এবং জন্ম তারিখ দিয়ে ইতিমধ্যে একজন নাগরিক নিবন্ধিত আছে / A citizen with the same name, father's name and date of birth is already registered",
+        };
       }
 
       const registrationNo = await generateCitizenRegistrationNo(
@@ -237,9 +313,13 @@ export class CitizenService {
         sanitizedData.presentAddress.ward
       );
 
+      // SECRETARY creates directly as ACTIVE, ENTREPRENEUR creates as PENDING
+      const status = creatorRole === "SECRETARY" ? "ACTIVE" : "PENDING";
+
       const citizen = await prisma.citizen.create({
         data: {
           registrationNo,
+          identityHash,
           nid: sanitizedData.nid,
           birthCertificateNo: sanitizedData.birthCertificateNo,
           name: sanitizedData.name,
@@ -249,7 +329,7 @@ export class CitizenService {
           fatherNameBn: sanitizedData.fatherNameBn,
           motherName: sanitizedData.motherName,
           motherNameBn: sanitizedData.motherNameBn,
-          dateOfBirth: sanitizedData.dateOfBirth,
+          dateOfBirth,
           gender: sanitizedData.gender,
           maritalStatus: sanitizedData.maritalStatus || "SINGLE",
           religion: sanitizedData.religion,
@@ -263,6 +343,7 @@ export class CitizenService {
           isFreedomFighter: sanitizedData.isFreedomFighter || false,
           isDisabled: sanitizedData.isDisabled || false,
           isWidow: sanitizedData.isWidow || false,
+          status,
           createdById: createdBy,
         },
       });
@@ -303,6 +384,13 @@ export class CitizenService {
     const sanitizedData = deepSanitize(data);
 
     try {
+      const normalizedData = {
+        ...sanitizedData,
+        ...(sanitizedData.dateOfBirth !== undefined
+          ? { dateOfBirth: normalizeCitizenDateOfBirth(sanitizedData.dateOfBirth) }
+          : {}),
+      };
+
       const citizen = await prisma.citizen.findUnique({
         where: { id },
       });
@@ -311,10 +399,46 @@ export class CitizenService {
         throw new Error("Citizen not found");
       }
 
-      if (sanitizedData.nid && sanitizedData.nid !== citizen.nid) {
+      // If name, fatherName, or dateOfBirth are being changed, regenerate identity hash
+      let identityHash: string | undefined;
+      if (
+        normalizedData.name !== undefined ||
+        normalizedData.fatherName !== undefined ||
+        normalizedData.dateOfBirth !== undefined
+      ) {
+        const newName = normalizedData.name ?? citizen.name;
+        const newFatherName = normalizedData.fatherName ?? citizen.fatherName;
+        const newDateOfBirth = normalizedData.dateOfBirth ?? citizen.dateOfBirth;
+
+        identityHash = generateCitizenIdentityHash(
+          newName,
+          newFatherName,
+          newDateOfBirth
+        );
+
+        // Check if the new identity hash already exists (for a different citizen)
+        if (identityHash !== citizen.identityHash) {
+          const allWithIdentity = await prisma.citizen.findMany({
+            where: { identityHash },
+            select: { id: true, deletedAt: true },
+          });
+          const existingIdentity = allWithIdentity.find(
+            c => !c.deletedAt && c.id !== id
+          );
+          if (existingIdentity) {
+            return {
+              success: false,
+              message:
+                "এই নাম, পিতার নাম এবং জন্ম তারিখ দিয়ে ইতিমধ্যে অন্য একজন নাগরিক নিবন্ধিত আছে / Another citizen with the same name, father's name and date of birth is already registered",
+            };
+          }
+        }
+      }
+
+      if (normalizedData.nid && normalizedData.nid !== citizen.nid) {
         const existingNid = await prisma.citizen.findFirst({
           where: {
-            nid: sanitizedData.nid,
+            nid: normalizedData.nid,
             id: { not: id },
             deletedAt: null,
           },
@@ -329,23 +453,24 @@ export class CitizenService {
         after: {},
       };
 
-      Object.keys(sanitizedData).forEach((key) => {
-        const k = key as keyof typeof sanitizedData;
+      Object.keys(normalizedData).forEach((key) => {
+        const k = key as keyof typeof normalizedData;
         const currentValue = citizen[k as keyof typeof citizen];
-        if (JSON.stringify(currentValue) !== JSON.stringify(sanitizedData[k])) {
+        if (JSON.stringify(currentValue) !== JSON.stringify(normalizedData[k])) {
           changes.before[key] = currentValue;
-          changes.after[key] = sanitizedData[k];
+          changes.after[key] = normalizedData[k];
         }
       });
 
       await prisma.citizen.updateMany({
         where: { id },
         data: {
-          ...sanitizedData,
+          ...normalizedData,
+          ...(identityHash !== undefined ? { identityHash } : {}),
           nameEn:
-            sanitizedData.name !== undefined
-              ? sanitizedData.nameEn || sanitizedData.name
-              : sanitizedData.nameEn,
+            normalizedData.name !== undefined
+              ? normalizedData.nameEn || normalizedData.name
+              : normalizedData.nameEn,
           updatedById: updatedBy,
         },
       });
@@ -431,45 +556,176 @@ export class CitizenService {
     byGender: Record<string, number>;
     byStatus: Record<string, number>;
   }> {
-    const where: Prisma.CitizenWhereInput = { deletedAt: null };
-    if (unionParishadId) {
-      where.unionParishadId = unionParishadId;
+    const baseWhere: Prisma.CitizenWhereInput = unionParishadId 
+      ? { unionParishadId } 
+      : {};
+
+    // Get all citizens and filter in app layer
+    const allCitizens = await prisma.citizen.findMany({
+      where: baseWhere,
+      select: { id: true, gender: true, status: true, presentAddress: true, deletedAt: true },
+    });
+
+    const activeCitizens = allCitizens.filter(c => !c.deletedAt);
+    const total = activeCitizens.length;
+
+    const byGender: Record<string, number> = {};
+    const byStatus: Record<string, number> = {};
+    const byWard: Record<number, number> = {};
+
+    for (const c of activeCitizens) {
+      byGender[c.gender] = (byGender[c.gender] || 0) + 1;
+      byStatus[c.status] = (byStatus[c.status] || 0) + 1;
+      const ward = (c.presentAddress as { ward?: number })?.ward;
+      if (ward) {
+        byWard[ward] = (byWard[ward] || 0) + 1;
+      }
     }
 
-    // For groupBy operations with composite types, we need raw aggregation
-    const [total, byGender, byStatus] = await Promise.all([
-      prisma.citizen.count({ where }),
-      prisma.citizen.groupBy({
-        by: ["gender"],
-        _count: true,
-        where,
-      }),
-      prisma.citizen.groupBy({
-        by: ["status"],
-        _count: true,
-        where,
-      }),
-    ]);
+    return { total, byWard, byGender, byStatus };
+  }
 
-    // For ward aggregation on nested field, use raw query
-    const byWardResult = await prisma.$runCommandRaw({
-      aggregate: "citizens",
-      pipeline: [
-        { $match: { deletedAt: null, ...(unionParishadId ? { unionParishadId: { $oid: unionParishadId } } : {}) } },
-        { $group: { _id: "$presentAddress.ward", count: { $sum: 1 } } },
-      ],
-      cursor: {},
-    }) as { cursor: { firstBatch: Array<{ _id: number; count: number }> } };
+  static async getPendingCount(): Promise<number> {
+    const citizens = await prisma.citizen.findMany({
+      where: { status: "PENDING" },
+      select: { id: true, deletedAt: true },
+    });
+    return citizens.filter(c => !c.deletedAt).length;
+  }
 
-    const byWard = Object.fromEntries(
-      (byWardResult.cursor?.firstBatch || []).map((w) => [w._id, w.count])
-    );
+  static async getPendingCitizens(params: {
+    page?: number;
+    limit?: number;
+  }): Promise<{
+    citizens: CitizenWithAge[];
+    total: number;
+    page: number;
+    totalPages: number;
+  }> {
+    const { page = 1, limit = 20 } = params;
+    const skip = (page - 1) * limit;
+
+    const allPending = await prisma.citizen.findMany({
+      where: { status: "PENDING" },
+      orderBy: { createdAt: "desc" },
+    });
+
+    // Filter soft-deleted in application layer
+    const activePending = allPending.filter(c => !c.deletedAt);
+    const total = activePending.length;
+    const citizens = activePending.slice(skip, skip + limit);
+
+    const citizensWithAge: CitizenWithAge[] = citizens.map((citizen) => ({
+      ...citizen,
+      age: calculateAge(citizen.dateOfBirth),
+    }));
 
     return {
+      citizens: citizensWithAge,
       total,
-      byWard,
-      byGender: Object.fromEntries(byGender.map((g) => [g.gender, g._count])),
-      byStatus: Object.fromEntries(byStatus.map((s) => [s.status, s._count])),
+      page,
+      totalPages: Math.ceil(total / limit),
     };
+  }
+
+  static async approve(
+    id: string,
+    approvedBy?: string
+  ): Promise<{ success: boolean; citizen?: Citizen; message: string }> {
+    if (!isValidObjectId(id)) {
+      return { success: false, message: "Invalid citizen ID" };
+    }
+
+    try {
+      const citizen = await prisma.citizen.findUnique({
+        where: { id },
+      });
+
+      if (!citizen) {
+        return { success: false, message: "Citizen not found" };
+      }
+
+      if (citizen.status !== "PENDING") {
+        return { success: false, message: "Citizen is not pending approval" };
+      }
+
+      const updatedCitizen = await prisma.citizen.update({
+        where: { id },
+        data: {
+          status: "ACTIVE",
+          updatedById: approvedBy,
+        },
+      });
+
+      await logAudit({
+        userId: approvedBy,
+        action: "APPROVE",
+        entityType: "CITIZEN",
+        entityId: citizen.id,
+        entityName: citizen.name,
+        description: `Citizen approved: ${citizen.name} (${citizen.registrationNo})`,
+        severity: "LOW",
+      });
+
+      return {
+        success: true,
+        citizen: updatedCitizen,
+        message: "Citizen approved successfully",
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: formatCitizenPersistenceError(error),
+      };
+    }
+  }
+
+  static async reject(
+    id: string,
+    rejectedBy?: string
+  ): Promise<{ success: boolean; message: string }> {
+    if (!isValidObjectId(id)) {
+      return { success: false, message: "Invalid citizen ID" };
+    }
+
+    try {
+      const citizen = await prisma.citizen.findUnique({
+        where: { id },
+      });
+
+      if (!citizen) {
+        return { success: false, message: "Citizen not found" };
+      }
+
+      if (citizen.status !== "PENDING") {
+        return { success: false, message: "Citizen is not pending approval" };
+      }
+
+      // Soft delete rejected citizen
+      await prisma.citizen.update({
+        where: { id },
+        data: {
+          deletedAt: new Date(),
+          updatedById: rejectedBy,
+        },
+      });
+
+      await logAudit({
+        userId: rejectedBy,
+        action: "REJECT",
+        entityType: "CITIZEN",
+        entityId: citizen.id,
+        entityName: citizen.name,
+        description: `Citizen rejected: ${citizen.name} (${citizen.registrationNo})`,
+        severity: "MEDIUM",
+      });
+
+      return { success: true, message: "Citizen rejected successfully" };
+    } catch (error) {
+      return {
+        success: false,
+        message: formatCitizenPersistenceError(error),
+      };
+    }
   }
 }

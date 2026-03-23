@@ -87,6 +87,10 @@ export function deepSanitize<T>(obj: T): T {
   if (obj === null || obj === undefined) {
     return obj;
   }
+
+  if (obj instanceof Date) {
+    return new Date(obj.getTime()) as unknown as T;
+  }
   
   if (typeof obj === "string") {
     return sanitizeString(obj) as unknown as T;

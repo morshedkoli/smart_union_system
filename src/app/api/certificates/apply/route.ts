@@ -1,6 +1,8 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { AuthenticatedRequest, requireAnyRole } from "@/server-middleware/role-auth.middleware";
 import { prisma } from "@/lib/db";
+import { withPrismaReadRetry, isTransientPrismaError } from "@/lib/prisma-retry";
+import { CertificateService } from "@/services/certificate.service";
 
 async function postHandler(request: AuthenticatedRequest) {
   try {
@@ -24,12 +26,15 @@ async function postHandler(request: AuthenticatedRequest) {
     }
 
     // Verify template exists and is active
-    const template = await prisma.certificateTemplate.findFirst({
-      where: {
-        id: templateId,
-        status: "ACTIVE",
-      },
-    });
+    const template = await withPrismaReadRetry(() =>
+      prisma.certificateTemplate.findFirst({
+        where: {
+          id: templateId,
+          status: "ACTIVE",
+          deletedAt: null,
+        },
+      })
+    );
 
     if (!template) {
       return NextResponse.json(
@@ -39,9 +44,11 @@ async function postHandler(request: AuthenticatedRequest) {
     }
 
     // Verify citizen exists
-    const citizen = await prisma.citizen.findUnique({
-      where: { id: citizenId },
-    });
+    const citizen = await withPrismaReadRetry(() =>
+      prisma.citizen.findUnique({
+        where: { id: citizenId },
+      })
+    );
 
     if (!citizen) {
       return NextResponse.json(
@@ -50,84 +57,59 @@ async function postHandler(request: AuthenticatedRequest) {
       );
     }
 
-    // Generate certificate number and reference number
-    const now = new Date();
-    const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
+    // Prepare data snapshot with citizen information
+    const dataSnapshot = {
+      name: citizen.name,
+      name_en: citizen.nameEn || citizen.name,
+      name_bn: citizen.nameBn,
+      father_name: citizen.fatherName,
+      father_name_bn: citizen.fatherNameBn || citizen.fatherName,
+      mother_name: citizen.motherName,
+      mother_name_bn: citizen.motherNameBn || citizen.motherName,
+      nid: citizen.nid,
+      date_of_birth: citizen.dateOfBirth.toISOString(),
+      gender: citizen.gender,
+      present_address: citizen.presentAddress,
+      permanent_address: citizen.permanentAddress,
+    };
 
-    // Get count of certificates for this template this month
-    const count = await prisma.certificate.count({
-      where: {
-        templateId,
-        createdAt: {
-          gte: new Date(year, now.getMonth(), 1),
-          lt: new Date(year, now.getMonth() + 1, 1),
-        },
-      },
-    });
-
-    const certificateNo = `${template.certificateType}-${year}${month}-${String(count + 1).padStart(4, '0')}`;
-    const referenceNo = `REF-${year}-${String(count + 1).padStart(6, '0')}`;
-
-    // Create certificate application
-    const certificate = await prisma.certificate.create({
-      data: {
-        certificateNo,
-        referenceNo,
-        type: template.certificateType,
-        status: "PENDING", // Pending approval
+    // Create certificate using the service
+    const result = await CertificateService.create(
+      {
         citizenId,
+        type: template.certificateType,
         templateId,
-        appliedById: request.user.id,
-        dataSnapshot: {
-          citizenData: {
-            name: citizen.name,
-            nameEn: citizen.nameEn,
-            nameBn: citizen.nameBn,
-            fatherName: citizen.fatherName,
-            motherName: citizen.motherName,
-            dateOfBirth: citizen.dateOfBirth,
-            nid: citizen.nid,
-            presentAddress: citizen.presentAddress,
-            permanentAddress: citizen.permanentAddress,
-          },
-          templateData: {
-            name: template.name,
-            nameEn: template.nameEn,
-            nameBn: template.nameBn,
-            certificateType: template.certificateType,
-            templateText: template.templateText,
-          },
-        },
+        dataSnapshot,
       },
-      include: {
-        citizen: {
-          select: {
-            name: true,
-            email: true,
-          },
-        },
-        template: {
-          select: {
-            nameEn: true,
-            nameBn: true,
-          },
-        },
-      },
-    });
+      request.user.id
+    );
+
+    if (!result.success) {
+      return NextResponse.json(
+        { success: false, message: result.message },
+        { status: 400 }
+      );
+    }
 
     return NextResponse.json({
       success: true,
       message: "Certificate application submitted successfully",
       certificate: {
-        id: certificate.id,
-        certificateNo: certificate.certificateNo,
-        referenceNo: certificate.referenceNo,
-        type: certificate.template?.nameEn || certificate.type,
-        status: certificate.status,
+        id: result.certificate!.id,
+        certificateNo: result.certificate!.certificateNo,
+        referenceNo: result.certificate!.referenceNo,
+        type: result.certificate!.type,
+        status: result.certificate!.status,
       },
     });
   } catch (error) {
+    if (isTransientPrismaError(error)) {
+      return NextResponse.json(
+        { success: false, message: "Database connection was interrupted. Please try again." },
+        { status: 503 }
+      );
+    }
+
     console.error("Apply certificate error:", error);
     return NextResponse.json(
       { success: false, message: "Failed to submit certificate application" },

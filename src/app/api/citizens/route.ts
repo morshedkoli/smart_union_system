@@ -1,13 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
+import { createCitizenSchema } from "@/lib/validation";
 import { CitizenService } from "@/services/citizen.service";
 import { CitizenStatus, Gender } from "@prisma/client";
+import { verifyToken, getTokenFromHeader } from "@/lib/auth";
 
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
+    const query = searchParams.get("query") || searchParams.get("search") || undefined;
 
     const params = {
-      query: searchParams.get("query") || undefined,
+      query,
       ward: searchParams.get("ward") ? parseInt(searchParams.get("ward")!) : undefined,
       status: searchParams.get("status") as CitizenStatus | undefined,
       gender: searchParams.get("gender") as Gender | undefined,
@@ -34,39 +37,44 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
+    // Get user from token
+    const cookieToken = request.cookies.get("auth-token")?.value;
+    const headerToken = getTokenFromHeader(request.headers.get("authorization"));
+    const token = cookieToken || headerToken;
 
-    // Validate required fields
-    const requiredFields = [
-      "name",
-      "nameBn",
-      "fatherName",
-      "fatherNameBn",
-      "motherName",
-      "motherNameBn",
-      "dateOfBirth",
-      "gender",
-      "presentAddress",
-      "permanentAddress",
-    ];
-    for (const field of requiredFields) {
-      if (!body[field]) {
-        return NextResponse.json(
-          { success: false, message: `${field} is required` },
-          { status: 400 }
-        );
-      }
+    if (!token) {
+      return NextResponse.json(
+        { success: false, message: "Authentication required" },
+        { status: 401 }
+      );
     }
 
-    // Validate ward in addresses
-    if (!body.presentAddress?.ward || !body.permanentAddress?.ward) {
+    const payload = await verifyToken(token);
+    if (!payload) {
       return NextResponse.json(
-        { success: false, message: "Ward number is required in address" },
+        { success: false, message: "Invalid token" },
+        { status: 401 }
+      );
+    }
+
+    const body = await request.json();
+    const parsedBody = createCitizenSchema.safeParse(body);
+
+    if (!parsedBody.success) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: parsedBody.error.issues[0]?.message || "Invalid citizen payload",
+        },
         { status: 400 }
       );
     }
 
-    const result = await CitizenService.create(body);
+    const result = await CitizenService.create(
+      parsedBody.data,
+      payload.userId,
+      payload.role
+    );
 
     if (!result.success) {
       return NextResponse.json(result, { status: 400 });

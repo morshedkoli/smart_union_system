@@ -29,103 +29,15 @@ function createBasePrismaClient() {
   });
 }
 
-// Create extended client with soft-delete middleware
+// Create extended client WITHOUT soft-delete middleware for MongoDB compatibility
+// Soft delete filtering is handled in the application layer
 function createExtendedPrismaClient() {
   const baseClient = createBasePrismaClient();
-  return baseClient.$extends({
-    query: {
-      $allModels: {
-        async findUnique({ model, args, query }) {
-          const modelName = model.toLowerCase();
-          if (!isSoftDeleteModel(modelName)) {
-            return query(args);
-          }
-
-          const where = (args?.where ?? {}) as Record<string, unknown>;
-          if (where.deletedAt !== undefined) {
-            return query(args);
-          }
-
-          // For MongoDB, use { $ne: new Date() } instead of null check
-          // This works around MongoDB's null comparison issues
-          return query({
-            ...args,
-            where: {
-              ...where,
-              deletedAt: { equals: null },
-            },
-          });
-        },
-        async findFirst({ model, args, query }) {
-          const modelName = model.toLowerCase();
-          if (!isSoftDeleteModel(modelName)) {
-            return query(args);
-          }
-
-          const where = (args?.where ?? {}) as Record<string, unknown>;
-          if (where.deletedAt !== undefined) {
-            return query(args);
-          }
-
-          // For MongoDB, use { $ne: new Date() } instead of null check
-          // This works around MongoDB's null comparison issues
-          return query({
-            ...args,
-            where: {
-              ...where,
-              deletedAt: { equals: null },
-            },
-          });
-        },
-        async findMany({ model, args, query }) {
-          const modelName = model.toLowerCase();
-          if (!isSoftDeleteModel(modelName)) {
-            return query(args);
-          }
-
-          const where = (args?.where ?? {}) as Record<string, unknown>;
-          if (where.deletedAt !== undefined) {
-            return query(args);
-          }
-
-          // For MongoDB, use { $ne: new Date() } instead of null check
-          // This works around MongoDB's null comparison issues
-          return query({
-            ...args,
-            where: {
-              ...where,
-              deletedAt: { equals: null },
-            },
-          });
-        },
-        async count({ model, args, query }) {
-          const modelName = model.toLowerCase();
-          if (!isSoftDeleteModel(modelName)) {
-            return query(args);
-          }
-
-          const where = (args?.where ?? {}) as Record<string, unknown>;
-          if (where.deletedAt !== undefined) {
-            return query(args);
-          }
-
-          // For MongoDB, use { $ne: new Date() } instead of null check
-          // This works around MongoDB's null comparison issues
-          return query({
-            ...args,
-            where: {
-              ...where,
-              deletedAt: { equals: null },
-            },
-          });
-        },
-      },
-    },
-  });
+  return baseClient;
 }
 
-// Extended client type
-export type ExtendedPrismaClient = ReturnType<typeof createExtendedPrismaClient>;
+// Extended client type (now just PrismaClient since we removed the extension)
+export type ExtendedPrismaClient = PrismaClient;
 
 // Global cache for development hot reload
 const globalForPrisma = globalThis as unknown as {

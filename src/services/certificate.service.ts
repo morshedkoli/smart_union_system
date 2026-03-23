@@ -7,6 +7,7 @@ import {
 } from "@/lib/prisma-utils";
 import { isCertificateValid } from "@/lib/prisma-virtuals";
 import { deepSanitize } from "@/lib/sanitize";
+import { withPrismaReadRetry, isTransientPrismaError } from "@/lib/prisma-retry";
 import { CertificateTemplateService } from "./certificate-template.service";
 import { HoldingTaxService } from "./holding-tax.service";
 import type {
@@ -193,12 +194,16 @@ export class CertificateService {
     try {
       const certificate = await prisma.$transaction(async (tx) => {
         const [citizen, template] = await Promise.all([
-          tx.citizen.findUnique({
-            where: { id: sanitizedData.citizenId },
-          }),
-          tx.certificateTemplate.findUnique({
-            where: { id: sanitizedData.templateId },
-          }),
+          withPrismaReadRetry(() =>
+            tx.citizen.findUnique({
+              where: { id: sanitizedData.citizenId },
+            })
+          ),
+          withPrismaReadRetry(() =>
+            tx.certificateTemplate.findUnique({
+              where: { id: sanitizedData.templateId },
+            })
+          ),
         ]);
 
         if (!citizen) {
@@ -277,6 +282,13 @@ export class CertificateService {
         message: "Certificate draft created successfully",
       };
     } catch (error) {
+      if (isTransientPrismaError(error)) {
+        return {
+          success: false,
+          message: "Database connection was interrupted. Please try again.",
+        };
+      }
+
       return {
         success: false,
         message: error instanceof Error ? error.message : "Failed to create certificate",

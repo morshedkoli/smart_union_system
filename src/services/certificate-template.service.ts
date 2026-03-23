@@ -4,6 +4,7 @@ import {
   SUPPORTED_CERTIFICATE_PLACEHOLDERS,
   SupportedCertificatePlaceholder,
 } from "@/lib/certificate-template";
+import { withPrismaReadRetry } from "@/lib/prisma-retry";
 import type { CertificateTemplate, CertificateType, TemplateStatus, Prisma } from "@prisma/client";
 
 // Re-export enum values for backward compatibility
@@ -69,9 +70,17 @@ function validateTemplatePlaceholders(content: {
 }
 
 export class CertificateTemplateService {
-  static async list(): Promise<CertificateTemplate[]> {
+  static async list(status?: TemplateStatus): Promise<CertificateTemplate[]> {
+    const where: Prisma.CertificateTemplateWhereInput = {
+      deletedAt: null,
+    };
+
+    if (status) {
+      where.status = status;
+    }
+
     const templates = await prisma.certificateTemplate.findMany({
-      where: { deletedAt: null },
+      where,
       orderBy: { updatedAt: "desc" },
     });
     return templates;
@@ -82,9 +91,11 @@ export class CertificateTemplateService {
       return null;
     }
 
-    const template = await prisma.certificateTemplate.findUnique({
-      where: { id },
-    });
+    const template = await withPrismaReadRetry(() =>
+      prisma.certificateTemplate.findUnique({
+        where: { id },
+      })
+    );
     return template;
   }
 

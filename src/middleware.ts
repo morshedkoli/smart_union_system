@@ -94,7 +94,8 @@ async function authMiddleware(request: NextRequest) {
     }
 
     // Check role authorization using JWT payload (no database call needed)
-    if (!allowedRoles.includes(payload.role)) {
+    // SECRETARY has access to all routes
+    if (payload.role !== "SECRETARY" && !allowedRoles.includes(payload.role)) {
       // Access denied, redirect to dashboard home
       return NextResponse.redirect(new URL(`/${locale}/dashboard`, request.url));
     }

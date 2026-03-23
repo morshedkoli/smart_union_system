@@ -54,7 +54,7 @@ export function SearchContent({ locale }: { locale: string }) {
 
     setLoading(true);
     try {
-      const res = await fetch(`/api/search?q=${encodeURIComponent(q)}&limit=15`);
+      const res = await fetch(`/api/search?q=${encodeURIComponent(q)}&limit=15&ts=${Date.now()}`, { cache: "no-store" });
       const data = await res.json();
       if (data.success) {
         setResults(data.results);

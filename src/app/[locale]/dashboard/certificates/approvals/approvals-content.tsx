@@ -33,7 +33,7 @@ export function ApprovalsContent({ locale }: { locale: string }) {
   const loadPending = async () => {
     setLoading(true);
     try {
-      const res = await fetch("/api/certificates?status=PENDING");
+      const res = await fetch(`/api/certificates?status=PENDING&ts=${Date.now()}`, { cache: "no-store" });
       const data = await res.json();
       if (data.success) {
         setCertificates(

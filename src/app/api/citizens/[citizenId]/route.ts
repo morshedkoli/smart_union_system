@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { updateCitizenSchema } from "@/lib/validation";
 import { CitizenService } from "@/services/citizen.service";
 
 interface RouteParams {
@@ -34,8 +35,19 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
   try {
     const { citizenId } = await params;
     const body = await request.json();
+    const parsedBody = updateCitizenSchema.safeParse(body);
 
-    const result = await CitizenService.update(citizenId, body);
+    if (!parsedBody.success) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: parsedBody.error.issues[0]?.message || "Invalid citizen payload",
+        },
+        { status: 400 }
+      );
+    }
+
+    const result = await CitizenService.update(citizenId, parsedBody.data);
 
     if (!result.success) {
       return NextResponse.json(result, { status: 400 });

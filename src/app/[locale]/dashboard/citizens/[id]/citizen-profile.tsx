@@ -421,7 +421,7 @@ export function CitizenProfile({ locale, citizen }: CitizenProfileProps) {
                     </TableHeader>
                     <TableBody>
                       {citizen.certificates.map((cert) => (
-                        <TableRow key={cert._id}>
+                        <TableRow key={cert.certificateNo}>
                           <TableCell className="font-medium">{cert.certificateNo}</TableCell>
                           <TableCell>{getCertificateTypeLabel(cert.type)}</TableCell>
                           <TableCell>

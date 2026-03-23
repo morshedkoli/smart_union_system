@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useMemo } from "react";
 import { useTranslations } from "next-intl";
+import { toast } from "sonner";
 import { FileText, Plus, Send } from "lucide-react";
 import { DashboardLayout } from "@/components/layout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -83,13 +84,16 @@ export function ApplyCertificateContent({ locale }: { locale: string }) {
       const data = await res.json();
 
       if (!res.ok || !data.success) {
-        setError(data.message || labels.loadFailed);
+        const message = data.message || labels.loadFailed;
+        setError(message);
+        toast.error(message);
         return;
       }
 
       setTemplates(data.templates || []);
     } catch {
       setError(labels.loadFailed);
+      toast.error(labels.loadFailed);
     } finally {
       setLoading(false);
     }
@@ -103,6 +107,7 @@ export function ApplyCertificateContent({ locale }: { locale: string }) {
     if (!selectedTemplate) return;
     if (!user?.citizenId) {
       setError(labels.citizenRequired);
+      toast.error(labels.citizenRequired);
       return;
     }
 
@@ -124,14 +129,18 @@ export function ApplyCertificateContent({ locale }: { locale: string }) {
       const data = await res.json();
 
       if (!res.ok || !data.success) {
-        setError(data.message || labels.applyFailed);
+        const message = data.message || labels.applyFailed;
+        setError(message);
+        toast.error(message);
         return;
       }
 
       setMessage(labels.applySuccess);
+      toast.success(labels.applySuccess);
       setSelectedTemplate(""); // Reset selection
     } catch {
       setError(labels.applyFailed);
+      toast.error(labels.applyFailed);
     } finally {
       setApplying(false);
     }

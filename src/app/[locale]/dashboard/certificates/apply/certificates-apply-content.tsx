@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useMemo } from "react";
+import { toast } from "sonner";
 import { FileText, Plus, Send, Search, Users } from "lucide-react";
 import { DashboardLayout } from "@/components/layout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -108,9 +109,12 @@ export function CertificatesApplyContent({ locale }: { locale: string }) {
       const data = await res.json();
       if (res.ok && data.success) {
         setTemplates(data.templates || []);
+      } else {
+        toast.error(data?.message || labels.loadFailed);
       }
     } catch {
       setError(labels.loadFailed);
+      toast.error(labels.loadFailed);
     } finally {
       setLoadingTemplates(false);
     }
@@ -135,7 +139,9 @@ export function CertificatesApplyContent({ locale }: { locale: string }) {
       const data = await res.json();
 
       if (!res.ok || !data.success) {
-        setError(data.message || labels.loadFailed);
+        const message = data.message || labels.loadFailed;
+        setError(message);
+        toast.error(message);
         return;
       }
 
@@ -143,6 +149,7 @@ export function CertificatesApplyContent({ locale }: { locale: string }) {
       setSelectedCitizen(""); // Reset selection
     } catch {
       setError(labels.loadFailed);
+      toast.error(labels.loadFailed);
     } finally {
       setLoadingCitizens(false);
     }
@@ -178,17 +185,21 @@ export function CertificatesApplyContent({ locale }: { locale: string }) {
       const data = await res.json();
 
       if (!res.ok || !data.success) {
-        setError(data.message || labels.applyFailed);
+        const message = data.message || labels.applyFailed;
+        setError(message);
+        toast.error(message);
         return;
       }
 
       setMessage(labels.applySuccess);
+      toast.success(labels.applySuccess);
       setSelectedTemplate("");
       setSelectedCitizen("");
       setCitizens([]);
       setSearchQuery("");
     } catch {
       setError(labels.applyFailed);
+      toast.error(labels.applyFailed);
     } finally {
       setApplying(false);
     }

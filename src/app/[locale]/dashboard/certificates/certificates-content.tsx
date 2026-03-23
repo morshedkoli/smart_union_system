@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { toast } from "sonner";
 import { DashboardLayout } from "@/components/layout";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -164,7 +165,7 @@ export function CertificatesContent({ locale }: { locale: string }) {
       const [citizenRes, templateRes, certRes] = await Promise.all([
         fetch("/api/citizens?limit=200"),
         fetch("/api/certificate-templates"),
-        fetch("/api/certificates"),
+        fetch(`/api/certificates?ts=${Date.now()}`, { cache: "no-store" }),
       ]);
       const [citizenData, templateData, certData] = await Promise.all([
         citizenRes.json(),
@@ -172,7 +173,7 @@ export function CertificatesContent({ locale }: { locale: string }) {
         certRes.json(),
       ]);
 
-      if (citizenData.success) {
+      if (citizenRes.ok && citizenData.success) {
         setCitizens(
           (citizenData.citizens || []).map(
             (citizen: {
@@ -192,7 +193,7 @@ export function CertificatesContent({ locale }: { locale: string }) {
           ).filter((citizen: CitizenOption) => Boolean(citizen.id))
         );
       }
-      if (templateData.success) {
+      if (templateRes.ok && templateData.success) {
         setTemplates(
           (templateData.templates || []).map(
             (template: {
@@ -210,13 +211,26 @@ export function CertificatesContent({ locale }: { locale: string }) {
           ).filter((template: TemplateOption) => Boolean(template.id))
         );
       }
-      if (certData.success) {
+      if (certRes.ok && certData.success) {
         setCertificates(normalizeCertificates(certData.certificates || []));
+      } else {
+        toast.error(
+          certData?.message ||
+            (locale === "bn" ? "সনদের তালিকা লোড করা যায়নি" : "Failed to load certificates")
+        );
       }
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : locale === "bn"
+          ? "ডেটা লোড করা যায়নি"
+          : "Failed to load certificate data"
+      );
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [locale]);
 
   useEffect(() => {
     fetchData();
@@ -243,7 +257,7 @@ export function CertificatesContent({ locale }: { locale: string }) {
 
   const handleCreate = async () => {
     if (!selectedCitizenId || !selectedTemplateId || !certificateType) {
-      alert(locale === "bn" ? "সব প্রয়োজনীয় তথ্য দিন" : "Please fill required fields");
+      toast.error(locale === "bn" ? "সব প্রয়োজনীয় তথ্য দিন" : "Please fill required fields");
       return;
     }
     setSaving(true);
@@ -265,11 +279,20 @@ export function CertificatesContent({ locale }: { locale: string }) {
       });
       const data = await res.json();
       if (!data.success) {
-        alert(data.message);
+        toast.error(data.message || (locale === "bn" ? "সনদ তৈরি ব্যর্থ হয়েছে" : "Failed to create certificate"));
         return;
       }
       resetForm();
       await fetchData();
+      toast.success(locale === "bn" ? "সনদ সফলভাবে তৈরি হয়েছে" : "Certificate created successfully");
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : locale === "bn"
+          ? "সনদ তৈরি ব্যর্থ হয়েছে"
+          : "Failed to create certificate"
+      );
     } finally {
       setSaving(false);
     }
@@ -293,11 +316,20 @@ export function CertificatesContent({ locale }: { locale: string }) {
       });
       const data = await res.json();
       if (!data.success) {
-        alert(data.message);
+        toast.error(data.message || (locale === "bn" ? "সনদ আপডেট ব্যর্থ হয়েছে" : "Failed to update certificate"));
         return;
       }
       resetForm();
       await fetchData();
+      toast.success(locale === "bn" ? "সনদ আপডেট হয়েছে" : "Certificate updated successfully");
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : locale === "bn"
+          ? "সনদ আপডেট ব্যর্থ হয়েছে"
+          : "Failed to update certificate"
+      );
     } finally {
       setSaving(false);
     }
@@ -314,10 +346,11 @@ export function CertificatesContent({ locale }: { locale: string }) {
     });
     const data = await res.json();
     if (!data.success) {
-      alert(data.message);
+      toast.error(data.message || (locale === "bn" ? "জমা ব্যর্থ হয়েছে" : "Failed to submit certificate"));
       return;
     }
     await fetchData();
+    toast.success(locale === "bn" ? "সনদ জমা দেওয়া হয়েছে" : "Certificate submitted successfully");
   };
 
   const handlePdfExport = (certificateId: string) => {

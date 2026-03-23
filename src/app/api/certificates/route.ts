@@ -3,6 +3,10 @@ import { CertificateService } from "@/services";
 import { CertificateStatus, CertificateType } from "@prisma/client";
 import { verifyToken, getTokenFromHeader } from "@/lib/auth";
 
+// Disable route segment caching for dynamic data
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 async function resolveUserId(request: NextRequest): Promise<string | undefined> {
   const cookieToken = request.cookies.get("auth-token")?.value;
   const headerToken = getTokenFromHeader(request.headers.get("authorization"));
@@ -18,11 +22,20 @@ export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
     const rawStatus = searchParams.get("status");
-    const normalizedStatus =
-      rawStatus === "SUBMITTED" ? "PENDING" : rawStatus;
-    const status = normalizedStatus as CertificateStatus | null;
+    const status = rawStatus as CertificateStatus | null;
     const certificates = await CertificateService.list(status || undefined);
-    return NextResponse.json({ success: true, certificates });
+
+    // Return with no-cache headers to ensure fresh data
+    return NextResponse.json(
+      { success: true, certificates },
+      {
+        headers: {
+          "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+          "Pragma": "no-cache",
+          "Expires": "0",
+        },
+      }
+    );
   } catch (error) {
     console.error("List certificates error:", error);
     return NextResponse.json(

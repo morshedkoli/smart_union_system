@@ -13,6 +13,7 @@ import {
   Trash2,
   ChevronLeft,
   ChevronRight,
+  ClipboardCheck,
 } from "lucide-react";
 import { DashboardLayout } from "@/components/layout";
 import { Button } from "@/components/ui/button";
@@ -43,7 +44,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useAuth } from "@/components/providers/auth-provider";
 
 interface Citizen {
-  _id: string;
+  id: string;
   registrationNo: string;
   name: string;
   nameBn: string;
@@ -67,8 +68,71 @@ export function CitizensContent({ locale }: CitizensContentProps) {
   const router = useRouter();
   const { user } = useAuth();
 
+  const [citizens, setCitizens] = useState<Citizen[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [wardFilter, setWardFilter] = useState<string>("");
+  const [statusFilter, setStatusFilter] = useState<string>("");
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [pendingCount, setPendingCount] = useState(0);
+
+  const isAuthorized = user && ["SECRETARY", "ENTREPRENEUR"].includes(user.role);
+  const isSecretary = user?.role === "SECRETARY";
+
+  const fetchPendingCount = useCallback(async () => {
+    if (!isSecretary) return;
+    try {
+      const res = await fetch("/api/citizens/pending?limit=1");
+      const data = await res.json();
+      if (data.success) {
+        setPendingCount(data.pendingCount || 0);
+      }
+    } catch (error) {
+      console.error("Failed to fetch pending count:", error);
+    }
+  }, [isSecretary]);
+
+  const fetchCitizens = useCallback(async () => {
+    if (!isAuthorized) return;
+    setLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (searchQuery) params.set("query", searchQuery);
+      if (wardFilter) params.set("ward", wardFilter);
+      if (statusFilter) params.set("status", statusFilter);
+      params.set("page", page.toString());
+      params.set("limit", "10");
+
+      const res = await fetch(`/api/citizens?${params.toString()}`);
+      const data = await res.json();
+
+      if (data.success) {
+        setCitizens(data.citizens || []);
+        setTotalPages(data.totalPages || 1);
+        setTotal(data.total || 0);
+      }
+    } catch (error) {
+      console.error("Failed to fetch citizens:", error);
+    } finally {
+      setLoading(false);
+    }
+  }, [searchQuery, wardFilter, statusFilter, page, isAuthorized]);
+
+  useEffect(() => {
+    const debounce = setTimeout(() => {
+      fetchCitizens();
+    }, 300);
+    return () => clearTimeout(debounce);
+  }, [fetchCitizens]);
+
+  useEffect(() => {
+    fetchPendingCount();
+  }, [fetchPendingCount]);
+
   // Role check - only SECRETARY and ENTREPRENEUR can access
-  if (!user || !["SECRETARY", "ENTREPRENEUR"].includes(user.role)) {
+  if (!isAuthorized) {
     return (
       <DashboardLayout>
         <div className="space-y-6">
@@ -88,47 +152,6 @@ export function CitizensContent({ locale }: CitizensContentProps) {
       </DashboardLayout>
     );
   }
-
-  const [citizens, setCitizens] = useState<Citizen[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [wardFilter, setWardFilter] = useState<string>("");
-  const [statusFilter, setStatusFilter] = useState<string>("");
-  const [page, setPage] = useState(1);
-  const [totalPages, setTotalPages] = useState(1);
-  const [total, setTotal] = useState(0);
-
-  const fetchCitizens = useCallback(async () => {
-    setLoading(true);
-    try {
-      const params = new URLSearchParams();
-      if (searchQuery) params.set("query", searchQuery);
-      if (wardFilter) params.set("ward", wardFilter);
-      if (statusFilter) params.set("status", statusFilter);
-      params.set("page", page.toString());
-      params.set("limit", "10");
-
-      const res = await fetch(`/api/citizens?${params.toString()}`);
-      const data = await res.json();
-
-      if (data.success) {
-        setCitizens(data.citizens);
-        setTotalPages(data.totalPages);
-        setTotal(data.total);
-      }
-    } catch (error) {
-      console.error("Failed to fetch citizens:", error);
-    } finally {
-      setLoading(false);
-    }
-  }, [searchQuery, wardFilter, statusFilter, page]);
-
-  useEffect(() => {
-    const debounce = setTimeout(() => {
-      fetchCitizens();
-    }, 300);
-    return () => clearTimeout(debounce);
-  }, [fetchCitizens]);
 
   const handleDelete = async (id: string) => {
     if (!confirm("Are you sure you want to delete this citizen?")) return;
@@ -181,10 +204,30 @@ export function CitizensContent({ locale }: CitizensContentProps) {
               {locale === "bn" ? "নাগরিকদের তথ্য পরিচালনা করুন" : "Manage citizen records"}
             </p>
           </div>
-          <Button onClick={() => router.push(`/${locale}/dashboard/citizens/new`)}>
-            <Plus className="mr-2 h-4 w-4" />
-            {locale === "bn" ? "নতুন নাগরিক" : "Add Citizen"}
-          </Button>
+          <div className="flex gap-2">
+            {isSecretary && (
+              <Button
+                variant="outline"
+                onClick={() => router.push(`/${locale}/dashboard/citizens/approvals`)}
+                className="relative"
+              >
+                <ClipboardCheck className="mr-2 h-4 w-4" />
+                {locale === "bn" ? "অনুমোদন" : "Approvals"}
+                {pendingCount > 0 && (
+                  <Badge
+                    variant="destructive"
+                    className="ml-2 h-5 min-w-5 flex items-center justify-center rounded-full px-1.5 text-xs"
+                  >
+                    {pendingCount}
+                  </Badge>
+                )}
+              </Button>
+            )}
+            <Button onClick={() => router.push(`/${locale}/dashboard/citizens/new`)}>
+              <Plus className="mr-2 h-4 w-4" />
+              {locale === "bn" ? "নতুন নাগরিক" : "Add Citizen"}
+            </Button>
+          </div>
         </div>
 
         {/* Filters */}
@@ -280,7 +323,7 @@ export function CitizensContent({ locale }: CitizensContentProps) {
                     </TableRow>
                   ) : (
                     citizens.map((citizen) => (
-                      <TableRow key={citizen._id}>
+                      <TableRow key={citizen.id}>
                         <TableCell className="font-medium">
                           {citizen.registrationNo}
                         </TableCell>
@@ -312,7 +355,7 @@ export function CitizensContent({ locale }: CitizensContentProps) {
                             <DropdownMenuContent align="end">
                               <DropdownMenuItem
                                 onClick={() =>
-                                  router.push(`/${locale}/dashboard/citizens/${citizen._id}`)
+                                  router.push(`/${locale}/dashboard/citizens/${citizen.id}`)
                                 }
                               >
                                 <Eye className="mr-2 h-4 w-4" />
@@ -320,14 +363,14 @@ export function CitizensContent({ locale }: CitizensContentProps) {
                               </DropdownMenuItem>
                               <DropdownMenuItem
                                 onClick={() =>
-                                  router.push(`/${locale}/dashboard/citizens/${citizen._id}/edit`)
+                                  router.push(`/${locale}/dashboard/citizens/${citizen.id}/edit`)
                                 }
                               >
                                 <Pencil className="mr-2 h-4 w-4" />
                                 {t("common.edit")}
                               </DropdownMenuItem>
                               <DropdownMenuItem
-                                onClick={() => handleDelete(citizen._id)}
+                                onClick={() => handleDelete(citizen.id)}
                                 className="text-destructive"
                               >
                                 <Trash2 className="mr-2 h-4 w-4" />

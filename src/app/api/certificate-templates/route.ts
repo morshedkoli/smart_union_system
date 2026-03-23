@@ -1,9 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { CertificateTemplateService } from "@/services/certificate-template.service";
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
-    const templates = await CertificateTemplateService.list();
+    const searchParams = request.nextUrl.searchParams;
+    const status = searchParams.get("status");
+
+    const templates = await CertificateTemplateService.list(
+      status as "ACTIVE" | "INACTIVE" | "DRAFT" | undefined
+    );
     return NextResponse.json({ success: true, templates });
   } catch (error) {
     console.error("List certificate templates error:", error);
