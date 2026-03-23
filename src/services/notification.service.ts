@@ -1,125 +1,112 @@
 import { prisma } from "@/lib/db";
-import { CertificateStatus, BeneficiaryStatus, HoldingTaxPaymentStatus } from "@prisma/client";
+import { NotificationStatus } from "@prisma/client";
 
 export interface NotificationAlertItem {
   id: string;
-  kind: "TAX_UNPAID" | "PENDING_APPROVAL";
   title: string;
+  titleBn?: string | null;
   message: string;
-  severity: "warning" | "info";
+  messageBn?: string | null;
+  type: string;
+  category: string;
   createdAt: string;
-  link: string;
+  link?: string | null;
+  readAt?: string | null;
 }
 
 export interface NotificationSummary {
   unreadCount: number;
-  counts: {
-    taxUnpaid: number;
-    pendingCertificateApprovals: number;
-    pendingReliefApprovals: number;
-  };
   alerts: NotificationAlertItem[];
 }
 
+const baseNotificationWhere = {
+  recipientType: "user",
+  isArchived: false,
+  deletedAt: null,
+} as const;
+
 export class NotificationService {
-  static async getAlerts(limitPerType = 5): Promise<NotificationSummary> {
-    const unpaidStatuses: HoldingTaxPaymentStatus[] = ["UNPAID", "PARTIAL", "OVERDUE"];
+  static async getUserNotifications(
+    userId: string,
+    limit = 6
+  ): Promise<NotificationSummary> {
+    const where = {
+      ...baseNotificationWhere,
+      recipientId: userId,
+    };
 
-    const [taxUnpaidCount, pendingCertificateCount, pendingReliefCount, unpaidTaxes, pendingCertificates, pendingRelief] =
-      await Promise.all([
-        prisma.holdingTax.count({
-          where: { status: { in: unpaidStatuses }, deletedAt: null },
-        }),
-        prisma.certificate.count({
-          where: { status: CertificateStatus.PENDING, deletedAt: null },
-        }),
-        prisma.beneficiary.count({
-          where: {
-            status: BeneficiaryStatus.VERIFIED,
-            isLocked: { not: true },
-            deletedAt: null,
-          },
-        }),
-        prisma.holdingTax.findMany({
-          where: { status: { in: unpaidStatuses }, deletedAt: null },
-          include: {
-            citizen: { select: { id: true, name: true, nameBn: true } },
-          },
-          orderBy: { dueDate: "asc" },
-          take: limitPerType,
-        }),
-        prisma.certificate.findMany({
-          where: { status: CertificateStatus.PENDING, deletedAt: null },
-          include: {
-            citizen: { select: { name: true, nameBn: true } },
-          },
-          orderBy: { createdAt: "desc" },
-          take: limitPerType,
-        }),
-        prisma.beneficiary.findMany({
-          where: {
-            status: BeneficiaryStatus.VERIFIED,
-            isLocked: { not: true },
-            deletedAt: null,
-          },
-          include: {
-            citizen: { select: { name: true, nameBn: true } },
-            program: { select: { name: true, nameBn: true } },
-          },
-          orderBy: { createdAt: "desc" },
-          take: limitPerType,
-        }),
-      ]);
-
-    const taxAlerts: NotificationAlertItem[] = unpaidTaxes.map((tax) => {
-      const citizenName = tax.citizen?.nameBn || tax.citizen?.name || "Citizen";
-      return {
-        id: `tax-${tax.id}`,
-        kind: "TAX_UNPAID",
-        title: "Unpaid holding tax",
-        message: `${citizenName} (${tax.holdingInfo.holdingNo}) due ৳${tax.balance}`,
-        severity: "warning",
-        createdAt: tax.dueDate ? new Date(tax.dueDate).toISOString() : new Date().toISOString(),
-        link: `/dashboard/citizens/${tax.citizen?.id || ""}`,
-      };
-    });
-
-    const certificateAlerts: NotificationAlertItem[] = pendingCertificates.map((certificate) => ({
-      id: `cert-${certificate.id}`,
-      kind: "PENDING_APPROVAL",
-      title: "Certificate pending approval",
-      message: `${certificate.applicantName || certificate.citizen?.name || "Applicant"} (${certificate.referenceNo})`,
-      severity: "info",
-      createdAt: new Date(certificate.createdAt).toISOString(),
-      link: "/dashboard/certificates/approvals",
-    }));
-
-    const reliefAlerts: NotificationAlertItem[] = pendingRelief.map((item) => {
-      const citizenName = item.citizen?.nameBn || item.citizen?.name || "Citizen";
-      const programName = item.program?.nameBn || item.program?.name || "Relief program";
-      return {
-        id: `relief-${item.id}`,
-        kind: "PENDING_APPROVAL",
-        title: "Relief pending approval",
-        message: `${citizenName} - ${programName}`,
-        severity: "info",
-        createdAt: new Date(item.createdAt).toISOString(),
-        link: "/dashboard/relief",
-      };
-    });
-
-    const alerts = [...taxAlerts, ...certificateAlerts, ...reliefAlerts]
-      .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
-      .slice(0, limitPerType * 3);
+    const [unreadCount, notifications] = await Promise.all([
+      prisma.notification.count({
+        where: {
+          ...where,
+          readAt: null,
+        },
+      }),
+      prisma.notification.findMany({
+        where,
+        orderBy: [{ createdAt: "desc" }],
+        take: limit,
+        select: {
+          id: true,
+          title: true,
+          titleBn: true,
+          message: true,
+          messageBn: true,
+          type: true,
+          category: true,
+          createdAt: true,
+          link: true,
+          readAt: true,
+        },
+      }),
+    ]);
 
     return {
-      unreadCount: taxUnpaidCount + pendingCertificateCount + pendingReliefCount,
-      counts: {
-        taxUnpaid: taxUnpaidCount,
-        pendingCertificateApprovals: pendingCertificateCount,
-        pendingReliefApprovals: pendingReliefCount,
-      },
-      alerts,
+      unreadCount,
+      alerts: notifications.map((notification) => ({
+        id: notification.id,
+        title: notification.title,
+        titleBn: notification.titleBn,
+        message: notification.message,
+        messageBn: notification.messageBn,
+        type: notification.type,
+        category: notification.category,
+        createdAt: notification.createdAt.toISOString(),
+        link: notification.link,
+        readAt: notification.readAt?.toISOString() ?? null,
+      })),
     };
+  }
+
+  static async markAsRead(notificationId: string, userId: string): Promise<boolean> {
+    const existingNotification = await prisma.notification.findFirst({
+      where: {
+        ...baseNotificationWhere,
+        id: notificationId,
+        recipientId: userId,
+      },
+      select: {
+        id: true,
+        readAt: true,
+      },
+    });
+
+    if (!existingNotification) {
+      return false;
+    }
+
+    if (existingNotification.readAt) {
+      return true;
+    }
+
+    await prisma.notification.update({
+      where: { id: notificationId },
+      data: {
+        readAt: new Date(),
+        status: NotificationStatus.READ,
+      },
+    });
+
+    return true;
   }
 }

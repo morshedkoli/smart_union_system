@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/card";
 
 interface CitizenData {
+  id?: string;
   _id?: string;
   nid?: string;
   birthCertificateNo?: string;
@@ -71,6 +72,16 @@ interface CitizenFormProps {
   isEdit?: boolean;
 }
 
+const BANGLA_NAME_FIELDS = ["nameBn", "fatherNameBn", "motherNameBn"] as const;
+const ENGLISH_NAME_FIELDS = ["name", "fatherName", "motherName"] as const;
+
+type BanglaNameField = (typeof BANGLA_NAME_FIELDS)[number];
+type EnglishNameField = (typeof ENGLISH_NAME_FIELDS)[number];
+type ScriptValidatedField = BanglaNameField | EnglishNameField;
+
+const BANGLA_NAME_PATTERN = /^[\u0980-\u09FF\s.'-]*$/;
+const ENGLISH_NAME_PATTERN = /^[A-Za-z\s.'-]*$/;
+
 const defaultData: CitizenData = {
   nid: "",
   birthCertificateNo: "",
@@ -112,6 +123,45 @@ const defaultData: CitizenData = {
   isWidow: false,
 };
 
+function isBanglaNameField(field: ScriptValidatedField): field is BanglaNameField {
+  return (BANGLA_NAME_FIELDS as readonly string[]).includes(field);
+}
+
+function getScriptValidationMessage(locale: string, field: ScriptValidatedField): string {
+  if (isBanglaNameField(field)) {
+    return locale === "bn"
+      ? "এই ঘরে শুধুমাত্র বাংলা অক্ষর ব্যবহার করুন"
+      : "This field accepts Bangla characters only";
+  }
+
+  return locale === "bn"
+    ? "এই ঘরে শুধুমাত্র ইংরেজি অক্ষর ব্যবহার করুন"
+    : "This field accepts English characters only";
+}
+
+function getScriptValidationErrors(
+  data: CitizenData,
+  locale: string
+): Partial<Record<ScriptValidatedField, string>> {
+  const errors: Partial<Record<ScriptValidatedField, string>> = {};
+
+  for (const field of BANGLA_NAME_FIELDS) {
+    const value = data[field]?.trim() || "";
+    if (value && !BANGLA_NAME_PATTERN.test(value)) {
+      errors[field] = getScriptValidationMessage(locale, field);
+    }
+  }
+
+  for (const field of ENGLISH_NAME_FIELDS) {
+    const value = data[field]?.trim() || "";
+    if (value && !ENGLISH_NAME_PATTERN.test(value)) {
+      errors[field] = getScriptValidationMessage(locale, field);
+    }
+  }
+
+  return errors;
+}
+
 export function CitizenForm({ locale, initialData, isEdit = false }: CitizenFormProps) {
   const t = useTranslations();
   const router = useRouter();
@@ -119,9 +169,32 @@ export function CitizenForm({ locale, initialData, isEdit = false }: CitizenForm
   const [error, setError] = useState("");
   const [formData, setFormData] = useState<CitizenData>(initialData || defaultData);
   const [sameAddress, setSameAddress] = useState(false);
+  const [fieldErrors, setFieldErrors] = useState<Partial<Record<ScriptValidatedField, string>>>(
+    {}
+  );
 
   const handleChange = (field: string, value: string | number | boolean) => {
     setFormData((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const handleValidatedNameChange = (field: ScriptValidatedField, value: string) => {
+    if (
+      (isBanglaNameField(field) && !BANGLA_NAME_PATTERN.test(value)) ||
+      (!isBanglaNameField(field) && !ENGLISH_NAME_PATTERN.test(value))
+    ) {
+      setFieldErrors((prev) => ({
+        ...prev,
+        [field]: getScriptValidationMessage(locale, field),
+      }));
+      return;
+    }
+
+    setFieldErrors((prev) => {
+      const next = { ...prev };
+      delete next[field];
+      return next;
+    });
+    handleChange(field, value);
   };
 
   const handleAddressChange = (
@@ -147,11 +220,23 @@ export function CitizenForm({ locale, initialData, isEdit = false }: CitizenForm
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    const validationErrors = getScriptValidationErrors(formData, locale);
+    if (Object.keys(validationErrors).length > 0) {
+      setFieldErrors(validationErrors);
+      setError(
+        locale === "bn"
+          ? "বাংলা ও ইংরেজি নামের ঘরগুলো সঠিক ভাষায় পূরণ করুন"
+          : "Please fill Bangla and English name fields in the correct language"
+      );
+      return;
+    }
+
     setLoading(true);
     setError("");
 
     try {
-      const url = isEdit ? `/api/citizens/${formData._id}` : "/api/citizens";
+      const citizenId = formData.id || formData._id;
+      const url = isEdit ? `/api/citizens/${citizenId}` : "/api/citizens";
       const method = isEdit ? "PUT" : "POST";
 
       const res = await fetch(url, {
@@ -220,6 +305,120 @@ export function CitizenForm({ locale, initialData, isEdit = false }: CitizenForm
         <Card>
           <CardHeader>
             <CardTitle>
+              {locale === "bn" ? "বাংলা তথ্য" : "Bangla Information"}
+            </CardTitle>
+            <CardDescription>
+              {locale === "bn"
+                ? "নাগরিকের বাংলা নাম সম্পর্কিত তথ্য"
+                : "Bangla name information for the citizen"}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+            <div className="space-y-2">
+              <Label htmlFor="nameBn">
+                {locale === "bn" ? "নাম (বাংলায়)" : "Name (Bangla)"} *
+              </Label>
+              <Input
+                id="nameBn"
+                value={formData.nameBn}
+                onChange={(e) => handleValidatedNameChange("nameBn", e.target.value)}
+                required
+              />
+              {fieldErrors.nameBn && (
+                <p className="text-sm text-destructive">{fieldErrors.nameBn}</p>
+              )}
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="fatherNameBn">
+                {locale === "bn" ? "পিতার নাম (বাংলায়)" : "Father's Name (Bangla)"} *
+              </Label>
+              <Input
+                id="fatherNameBn"
+                value={formData.fatherNameBn}
+                onChange={(e) => handleValidatedNameChange("fatherNameBn", e.target.value)}
+                required
+              />
+              {fieldErrors.fatherNameBn && (
+                <p className="text-sm text-destructive">{fieldErrors.fatherNameBn}</p>
+              )}
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="motherNameBn">
+                {locale === "bn" ? "মাতার নাম (বাংলায়)" : "Mother's Name (Bangla)"} *
+              </Label>
+              <Input
+                id="motherNameBn"
+                value={formData.motherNameBn}
+                onChange={(e) => handleValidatedNameChange("motherNameBn", e.target.value)}
+                required
+              />
+              {fieldErrors.motherNameBn && (
+                <p className="text-sm text-destructive">{fieldErrors.motherNameBn}</p>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>
+              {locale === "bn" ? "ইংরেজি তথ্য" : "English Information"}
+            </CardTitle>
+            <CardDescription>
+              {locale === "bn"
+                ? "নাগরিকের ইংরেজি নাম সম্পর্কিত তথ্য"
+                : "English name information for the citizen"}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+            <div className="space-y-2">
+              <Label htmlFor="name">
+                {locale === "bn" ? "নাম (ইংরেজিতে)" : "Name (English)"} *
+              </Label>
+              <Input
+                id="name"
+                value={formData.name}
+                onChange={(e) => handleValidatedNameChange("name", e.target.value)}
+                required
+              />
+              {fieldErrors.name && (
+                <p className="text-sm text-destructive">{fieldErrors.name}</p>
+              )}
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="fatherName">
+                {locale === "bn" ? "পিতার নাম (ইংরেজিতে)" : "Father's Name (English)"} *
+              </Label>
+              <Input
+                id="fatherName"
+                value={formData.fatherName}
+                onChange={(e) => handleValidatedNameChange("fatherName", e.target.value)}
+                required
+              />
+              {fieldErrors.fatherName && (
+                <p className="text-sm text-destructive">{fieldErrors.fatherName}</p>
+              )}
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="motherName">
+                {locale === "bn" ? "মাতার নাম (ইংরেজিতে)" : "Mother's Name (English)"} *
+              </Label>
+              <Input
+                id="motherName"
+                value={formData.motherName}
+                onChange={(e) => handleValidatedNameChange("motherName", e.target.value)}
+                required
+              />
+              {fieldErrors.motherName && (
+                <p className="text-sm text-destructive">{fieldErrors.motherName}</p>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>
               {locale === "bn" ? "ব্যক্তিগত তথ্য" : "Personal Information"}
             </CardTitle>
             <CardDescription>
@@ -246,50 +445,6 @@ export function CitizenForm({ locale, initialData, isEdit = false }: CitizenForm
                 id="birthCertificateNo"
                 value={formData.birthCertificateNo}
                 onChange={(e) => handleChange("birthCertificateNo", e.target.value)}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="nameBn">
-                {locale === "bn" ? "নাম (বাংলায়)" : "Name (Bengali)"} *
-              </Label>
-              <Input
-                id="nameBn"
-                value={formData.nameBn}
-                onChange={(e) => handleChange("nameBn", e.target.value)}
-                required
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="name">
-                {locale === "bn" ? "নাম (ইংরেজিতে)" : "Name (English)"} *
-              </Label>
-              <Input
-                id="name"
-                value={formData.name}
-                onChange={(e) => handleChange("name", e.target.value)}
-                required
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="fatherName">
-                {locale === "bn" ? "পিতার নাম" : "Father's Name"} *
-              </Label>
-              <Input
-                id="fatherName"
-                value={formData.fatherName}
-                onChange={(e) => handleChange("fatherName", e.target.value)}
-                required
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="motherName">
-                {locale === "bn" ? "মাতার নাম" : "Mother's Name"} *
-              </Label>
-              <Input
-                id="motherName"
-                value={formData.motherName}
-                onChange={(e) => handleChange("motherName", e.target.value)}
-                required
               />
             </div>
             <div className="space-y-2">

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { DashboardLayout } from "@/components/layout";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -30,21 +30,22 @@ import {
 } from "@/components/ui/table";
 
 interface CitizenOption {
-  _id: string;
+  id: string;
   name: string;
   nameBn: string;
   fatherName?: string;
+  fatherNameBn?: string;
 }
 
 interface TemplateOption {
-  _id: string;
+  id: string;
   name: string;
   nameBn: string;
   certificateType: string;
 }
 
 interface CertificateItem {
-  _id: string;
+  id: string;
   referenceNo: string;
   certificateNo: string;
   type: string;
@@ -53,7 +54,9 @@ interface CertificateItem {
   finalText: string;
   dataSnapshot: {
     name?: string;
+    name_bn?: string;
     father_name?: string;
+    father_name_bn?: string;
   };
 }
 
@@ -74,6 +77,52 @@ interface PrintHistoryItem {
   note?: string;
 }
 
+interface CertificateApiItem {
+  id?: string;
+  _id?: string;
+  referenceNo?: string;
+  certificateNo?: string | null;
+  type?: string;
+  status?: string;
+  applicantName?: string | null;
+  finalText?: string | null;
+  metadata?: {
+    customFields?: {
+      name?: string;
+      name_bn?: string;
+      father_name?: string;
+      father_name_bn?: string;
+    };
+  } | null;
+}
+
+function normalizeCertificates(items: CertificateApiItem[]): CertificateItem[] {
+  return items.reduce<CertificateItem[]>((normalized, item) => {
+      const id = item.id || item._id;
+      if (!id) {
+        return normalized;
+      }
+
+      normalized.push({
+        id,
+        referenceNo: item.referenceNo || "",
+        certificateNo: item.certificateNo || "",
+        type: item.type || "",
+        status: item.status || "",
+        applicantName: item.applicantName || "",
+        finalText: item.finalText || "",
+        dataSnapshot: {
+          name: item.metadata?.customFields?.name,
+          name_bn: item.metadata?.customFields?.name_bn,
+          father_name: item.metadata?.customFields?.father_name,
+          father_name_bn: item.metadata?.customFields?.father_name_bn,
+        },
+      });
+
+      return normalized;
+    }, []);
+}
+
 const certificateTypeOptions = [
   "BIRTH",
   "DEATH",
@@ -92,7 +141,9 @@ export function CertificatesContent({ locale }: { locale: string }) {
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
   const [certificateType, setCertificateType] = useState("CITIZENSHIP");
   const [name, setName] = useState("");
+  const [nameBn, setNameBn] = useState("");
   const [fatherName, setFatherName] = useState("");
+  const [fatherNameBn, setFatherNameBn] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -103,11 +154,11 @@ export function CertificatesContent({ locale }: { locale: string }) {
   const [printMessage, setPrintMessage] = useState("");
 
   const selectedCitizen = useMemo(
-    () => citizens.find((c) => c._id === selectedCitizenId),
+    () => citizens.find((c) => c.id === selectedCitizenId),
     [citizens, selectedCitizenId]
   );
 
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     setLoading(true);
     try {
       const [citizenRes, templateRes, certRes] = await Promise.all([
@@ -122,27 +173,61 @@ export function CertificatesContent({ locale }: { locale: string }) {
       ]);
 
       if (citizenData.success) {
-        setCitizens(citizenData.citizens);
+        setCitizens(
+          (citizenData.citizens || []).map(
+            (citizen: {
+              id?: string;
+              _id?: string;
+              name?: string;
+              nameBn?: string;
+              fatherName?: string;
+              fatherNameBn?: string;
+            }) => ({
+              id: citizen.id || citizen._id || "",
+              name: citizen.name || "",
+              nameBn: citizen.nameBn || "",
+              fatherName: citizen.fatherName,
+              fatherNameBn: citizen.fatherNameBn,
+            })
+          ).filter((citizen: CitizenOption) => Boolean(citizen.id))
+        );
       }
       if (templateData.success) {
-        setTemplates(templateData.templates);
+        setTemplates(
+          (templateData.templates || []).map(
+            (template: {
+              id?: string;
+              _id?: string;
+              name?: string;
+              nameBn?: string;
+              certificateType?: string;
+            }) => ({
+              id: template.id || template._id || "",
+              name: template.name || "",
+              nameBn: template.nameBn || "",
+              certificateType: template.certificateType || "",
+            })
+          ).filter((template: TemplateOption) => Boolean(template.id))
+        );
       }
       if (certData.success) {
-        setCertificates(certData.certificates);
+        setCertificates(normalizeCertificates(certData.certificates || []));
       }
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     fetchData();
-  }, []);
+  }, [fetchData]);
 
   useEffect(() => {
     if (!selectedCitizen) return;
     setName(selectedCitizen.name || "");
+    setNameBn(selectedCitizen.nameBn || "");
     setFatherName(selectedCitizen.fatherName || "");
+    setFatherNameBn(selectedCitizen.fatherNameBn || "");
   }, [selectedCitizen]);
 
   const resetForm = () => {
@@ -151,7 +236,9 @@ export function CertificatesContent({ locale }: { locale: string }) {
     setSelectedTemplateId("");
     setCertificateType("CITIZENSHIP");
     setName("");
+    setNameBn("");
     setFatherName("");
+    setFatherNameBn("");
   };
 
   const handleCreate = async () => {
@@ -170,7 +257,9 @@ export function CertificatesContent({ locale }: { locale: string }) {
           templateId: selectedTemplateId,
           dataSnapshot: {
             name,
+            name_bn: nameBn,
             father_name: fatherName,
+            father_name_bn: fatherNameBn,
           },
         }),
       });
@@ -196,7 +285,9 @@ export function CertificatesContent({ locale }: { locale: string }) {
         body: JSON.stringify({
           dataSnapshot: {
             name,
+            name_bn: nameBn,
             father_name: fatherName,
+            father_name_bn: fatherNameBn,
           },
         }),
       });
@@ -311,7 +402,7 @@ export function CertificatesContent({ locale }: { locale: string }) {
                   </SelectTrigger>
                   <SelectContent>
                     {citizens.map((citizen) => (
-                      <SelectItem key={citizen._id} value={citizen._id}>
+                      <SelectItem key={citizen.id} value={citizen.id}>
                         {citizen.nameBn || citizen.name}
                       </SelectItem>
                     ))}
@@ -343,7 +434,7 @@ export function CertificatesContent({ locale }: { locale: string }) {
                     {templates
                       .filter((t) => t.certificateType === certificateType)
                       .map((template) => (
-                        <SelectItem key={template._id} value={template._id}>
+                        <SelectItem key={template.id} value={template.id}>
                           {template.nameBn || template.name}
                         </SelectItem>
                       ))}
@@ -354,12 +445,20 @@ export function CertificatesContent({ locale }: { locale: string }) {
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="space-y-2">
-                <Label>{`{{name}}`}</Label>
+                <Label>{locale === "bn" ? "নাম (ইংরেজি)" : "Name (English)"}</Label>
                 <Input value={name} onChange={(e) => setName(e.target.value)} />
               </div>
               <div className="space-y-2">
-                <Label>{`{{father_name}}`}</Label>
+                <Label>{locale === "bn" ? "নাম (বাংলা)" : "Name (Bangla)"}</Label>
+                <Input value={nameBn} onChange={(e) => setNameBn(e.target.value)} />
+              </div>
+              <div className="space-y-2">
+                <Label>{locale === "bn" ? "পিতার নাম (ইংরেজি)" : "Father's Name (English)"}</Label>
                 <Input value={fatherName} onChange={(e) => setFatherName(e.target.value)} />
+              </div>
+              <div className="space-y-2">
+                <Label>{locale === "bn" ? "পিতার নাম (বাংলা)" : "Father's Name (Bangla)"}</Label>
+                <Input value={fatherNameBn} onChange={(e) => setFatherNameBn(e.target.value)} />
               </div>
             </div>
 
@@ -370,7 +469,7 @@ export function CertificatesContent({ locale }: { locale: string }) {
                 </Button>
               ) : (
                 <Button onClick={handleCreate} disabled={saving}>
-                  {locale === "bn" ? "খসড়া তৈরি" : "Create Draft"}
+                  {locale === "bn" ? "সনদ তৈরি" : "Create Certificate"}
                 </Button>
               )}
               <Button variant="outline" onClick={resetForm}>
@@ -402,18 +501,20 @@ export function CertificatesContent({ locale }: { locale: string }) {
                   </TableHeader>
                   <TableBody>
                     {certificates.map((item) => (
-                      <TableRow key={item._id}>
+                      <TableRow key={item.id}>
                         <TableCell>{item.referenceNo}</TableCell>
-                        <TableCell>{item.certificateNo}</TableCell>
-                        <TableCell>{item.applicantName}</TableCell>
+                        <TableCell>{item.certificateNo || "—"}</TableCell>
+                        <TableCell>{item.applicantName || item.dataSnapshot?.name || "—"}</TableCell>
                         <TableCell>{item.type}</TableCell>
                         <TableCell>
                           <Badge
                             variant={
                               item.status === "APPROVED"
                                 ? "success"
-                                : item.status === "SUBMITTED"
+                                : item.status === "PENDING"
                                 ? "warning"
+                                : item.status === "REJECTED"
+                                ? "destructive"
                                 : "outline"
                             }
                           >
@@ -427,28 +528,30 @@ export function CertificatesContent({ locale }: { locale: string }) {
                                 size="sm"
                                 variant="outline"
                                 onClick={() => {
-                                  setEditingId(item._id);
+                                  setEditingId(item.id);
                                   setName(item.dataSnapshot?.name || item.applicantName || "");
+                                  setNameBn(item.dataSnapshot?.name_bn || "");
                                   setFatherName(item.dataSnapshot?.father_name || "");
+                                  setFatherNameBn(item.dataSnapshot?.father_name_bn || "");
                                 }}
                               >
                                 {locale === "bn" ? "সম্পাদনা" : "Edit"}
                               </Button>
                             )}
-                            {item.status === "DRAFT" || item.status === "PENDING" || item.status === "REJECTED" ? (
-                              <Button size="sm" onClick={() => handleSubmit(item._id)}>
+                            {item.status === "REJECTED" ? (
+                              <Button size="sm" onClick={() => handleSubmit(item.id)}>
                                 {locale === "bn" ? "জমা" : "Submit"}
                               </Button>
                             ) : null}
                             {item.status === "APPROVED" && (
                               <>
-                                <Button size="sm" variant="outline" onClick={() => openPrintPreview(item._id)}>
+                                <Button size="sm" variant="outline" onClick={() => openPrintPreview(item.id)}>
                                   {locale === "bn" ? "প্রিন্ট প্রিভিউ" : "Print Preview"}
                                 </Button>
-                                <Button size="sm" variant="outline" onClick={() => openPrintHistory(item._id)}>
+                                <Button size="sm" variant="outline" onClick={() => openPrintHistory(item.id)}>
                                   {locale === "bn" ? "প্রিন্ট ইতিহাস" : "Print History"}
                                 </Button>
-                                <Button size="sm" variant="outline" onClick={() => handlePdfExport(item._id)}>
+                                <Button size="sm" variant="outline" onClick={() => handlePdfExport(item.id)}>
                                   {locale === "bn" ? "PDF" : "PDF"}
                                 </Button>
                               </>
@@ -481,7 +584,7 @@ export function CertificatesContent({ locale }: { locale: string }) {
                   <h2 className="text-xl font-bold">Smart Union Parishad</h2>
                   <p className="text-sm text-muted-foreground">Reference: {printPreview.referenceNo}</p>
                 </div>
-                <div dangerouslySetInnerHTML={{ __html: printPreview.finalText }} />
+                <div dangerouslySetInnerHTML={{ __html: printPreview.finalText || "" }} />
               </div>
               <div className="flex items-center justify-between text-sm text-muted-foreground">
                 <span>

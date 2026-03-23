@@ -25,7 +25,14 @@ export interface CertificateTemplateUpsertData {
 
 export interface CertificatePreviewData {
   name?: string;
+  name_en?: string;
+  name_bn?: string;
   father_name?: string;
+  father_name_en?: string;
+  father_name_bn?: string;
+  mother_name?: string;
+  mother_name_en?: string;
+  mother_name_bn?: string;
 }
 
 function extractPlaceholders(content: {
@@ -59,36 +66,6 @@ function validateTemplatePlaceholders(content: {
     valid: invalidPlaceholders.length === 0,
     invalidPlaceholders,
   };
-}
-
-async function logAudit(data: {
-  userId?: string;
-  action: string;
-  entityType: string;
-  entityId: string;
-  entityName?: string;
-  description?: string;
-  severity?: string;
-  changes?: object;
-}): Promise<void> {
-  try {
-    if (data.userId && isValidObjectId(data.userId)) {
-      await prisma.auditLog.create({
-        data: {
-          userId: data.userId,
-          action: data.action,
-          entityType: data.entityType,
-          entityId: data.entityId,
-          entityName: data.entityName,
-          description: data.description,
-          severity: data.severity || "LOW",
-          changes: data.changes,
-        },
-      });
-    }
-  } catch {
-    console.error("Failed to create audit log");
-  }
 }
 
 export class CertificateTemplateService {
@@ -365,7 +342,7 @@ export class CertificateTemplateService {
               entityName: existing.name,
               description: `Certificate template updated: ${existing.name}`,
               severity: "LOW",
-              changes,
+              changes: changes as Prisma.InputJsonObject,
             },
           });
         }
@@ -457,12 +434,32 @@ export class CertificateTemplateService {
 
     const defaultData: Record<SupportedCertificatePlaceholder, string> = {
       name: "Rahim Uddin",
+      name_en: "Rahim Uddin",
+      name_bn: "রহিম উদ্দিন",
       father_name: "Karim Uddin",
+      father_name_en: "Karim Uddin",
+      father_name_bn: "করিম উদ্দিন",
+      mother_name: "Amena Begum",
+      mother_name_en: "Amena Begum",
+      mother_name_bn: "আমেনা বেগম",
     };
 
     const mergedData: Record<SupportedCertificatePlaceholder, string> = {
       name: previewData.name?.trim() || defaultData.name,
+      name_en: previewData.name_en?.trim() || previewData.name?.trim() || defaultData.name_en,
+      name_bn: previewData.name_bn?.trim() || defaultData.name_bn,
       father_name: previewData.father_name?.trim() || defaultData.father_name,
+      father_name_en:
+        previewData.father_name_en?.trim() ||
+        previewData.father_name?.trim() ||
+        defaultData.father_name_en,
+      father_name_bn: previewData.father_name_bn?.trim() || defaultData.father_name_bn,
+      mother_name: previewData.mother_name?.trim() || defaultData.mother_name,
+      mother_name_en:
+        previewData.mother_name_en?.trim() ||
+        previewData.mother_name?.trim() ||
+        defaultData.mother_name_en,
+      mother_name_bn: previewData.mother_name_bn?.trim() || defaultData.mother_name_bn,
     };
 
     const replacePlaceholders = (input: string): string => {

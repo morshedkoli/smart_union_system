@@ -7,5 +7,6 @@ export { FinanceService } from "./finance.service";
 export { GlobalSearchService } from "./global-search.service";
 export { ExcelService } from "./excel.service";
 export { NotificationService } from "./notification.service";
+export { DashboardService } from "./dashboard.service";
 export { CitizenPortalService } from "./citizen-portal.service";
 export { SettingsService } from "./settings.service";

@@ -12,7 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
 interface CashbookEntry {
-  _id: string;
+  id: string;
   entryNo: string;
   voucherNo: string;
   transactionDate: string;
@@ -22,6 +22,20 @@ interface CashbookEntry {
   amount: number;
   paymentMode: string;
   status: string;
+}
+
+interface CashbookEntryApiItem {
+  id?: string;
+  _id?: string;
+  entryNo?: string;
+  voucherNo?: string;
+  transactionDate?: string;
+  transactionType?: string;
+  category?: string;
+  description?: string;
+  amount?: number;
+  paymentMode?: string;
+  status?: string;
 }
 
 interface DailyReport {
@@ -79,6 +93,30 @@ function toDateInputValue(date: Date): string {
   return date.toISOString().split("T")[0];
 }
 
+function normalizeEntries(items: CashbookEntryApiItem[]): CashbookEntry[] {
+  return items
+    .map((item) => {
+      const id = item.id || item._id;
+      if (!id) {
+        return null;
+      }
+
+      return {
+        id,
+        entryNo: item.entryNo || "",
+        voucherNo: item.voucherNo || "",
+        transactionDate: item.transactionDate || "",
+        transactionType: item.transactionType || "",
+        category: item.category || "",
+        description: item.description || "",
+        amount: item.amount ?? 0,
+        paymentMode: item.paymentMode || "",
+        status: item.status || "",
+      };
+    })
+    .filter((item): item is CashbookEntry => item !== null);
+}
+
 export function FinanceContent({ locale }: { locale: string }) {
   const today = useMemo(() => new Date(), []);
   const [entries, setEntries] = useState<CashbookEntry[]>([]);
@@ -128,7 +166,7 @@ export function FinanceContent({ locale }: { locale: string }) {
       const res = await fetch(`/api/finance/cashbook?${params.toString()}`);
       const data = await res.json();
       if (data.success) {
-        setEntries(data.entries || []);
+        setEntries(normalizeEntries(data.entries || []));
         setSummary(data.summary || { income: 0, expense: 0, balance: 0 });
       }
     } finally {
@@ -365,7 +403,7 @@ export function FinanceContent({ locale }: { locale: string }) {
                       </TableRow>
                     ) : (
                       entries.map((entry) => (
-                        <TableRow key={entry._id}>
+                        <TableRow key={entry.id}>
                           <TableCell>{new Date(entry.transactionDate).toLocaleDateString()}</TableCell>
                           <TableCell>{entry.entryNo}</TableCell>
                           <TableCell>{entry.voucherNo}</TableCell>

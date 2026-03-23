@@ -34,6 +34,18 @@ interface UpdateCertificateData {
   dataSnapshot?: Record<string, unknown>;
 }
 
+type CertificateSnapshot = {
+  name?: string;
+  name_en?: string;
+  name_bn?: string;
+  father_name?: string;
+  father_name_en?: string;
+  father_name_bn?: string;
+  mother_name?: string;
+  mother_name_en?: string;
+  mother_name_bn?: string;
+};
+
 export interface CertificateWithRelations extends Certificate {
   citizen?: Pick<Citizen, "id" | "name" | "nameBn" | "nid" | "fatherName">;
   template?: Pick<CertificateTemplate, "id" | "name" | "nameBn"> | null;
@@ -42,7 +54,11 @@ export interface CertificateWithRelations extends Certificate {
 const SYSTEM_USER_ID = "000000000000000000000001";
 
 async function logAudit(
-  tx: Prisma.TransactionClient,
+  tx: {
+    auditLog: {
+      create: unknown;
+    };
+  },
   data: {
     userId: string;
     action: string;
@@ -51,12 +67,16 @@ async function logAudit(
     entityName?: string;
     description?: string;
     severity?: string;
-    changes?: object;
+    changes?: Prisma.InputJsonValue;
   }
 ): Promise<void> {
   try {
     if (isValidObjectId(data.userId)) {
-      await tx.auditLog.create({
+      const createAuditLog = tx.auditLog.create as (args: {
+        data: Record<string, unknown>;
+      }) => Promise<unknown>;
+
+      await createAuditLog({
         data: {
           userId: data.userId,
           action: data.action,
@@ -72,6 +92,26 @@ async function logAudit(
   } catch {
     console.error("Failed to create audit log");
   }
+}
+
+function toCertificateSnapshot(data: Record<string, unknown> | undefined): CertificateSnapshot {
+  return (data || {}) as CertificateSnapshot;
+}
+
+function toMetadataJson(data: Record<string, unknown>): Prisma.InputJsonObject {
+  return {
+    customFields: data as Prisma.InputJsonObject,
+  };
+}
+
+function toAuditChangesJson(changes: {
+  before: Record<string, unknown>;
+  after: Record<string, unknown>;
+}): Prisma.InputJsonObject {
+  return {
+    before: changes.before as Prisma.InputJsonObject,
+    after: changes.after as Prisma.InputJsonObject,
+  };
 }
 
 export class CertificateService {
@@ -180,7 +220,7 @@ export class CertificateService {
             footerHtml: template.footerHtml,
             stylesCss: template.stylesCss,
           },
-          sanitizedData.dataSnapshot as { name?: string; father_name?: string }
+          toCertificateSnapshot(sanitizedData.dataSnapshot)
         );
 
         const ownerId =
@@ -194,11 +234,10 @@ export class CertificateService {
             citizenId: sanitizedData.citizenId,
             templateId: sanitizedData.templateId,
             applicantName: (sanitizedData.dataSnapshot?.name as string) || citizen.name,
-            applicantNameBn: citizen.nameBn,
+            applicantNameBn:
+              (sanitizedData.dataSnapshot?.name_bn as string) || citizen.nameBn,
             finalText,
-            metadata: {
-              customFields: sanitizedData.dataSnapshot,
-            },
+            metadata: toMetadataJson(sanitizedData.dataSnapshot),
             status: "PENDING",
             fee: template.fee || 0,
             feeStatus: "UNPAID",
@@ -290,19 +329,20 @@ export class CertificateService {
               footerHtml: existing.template.footerHtml,
               stylesCss: existing.template.stylesCss,
             },
-            sanitizedData.dataSnapshot as { name?: string; father_name?: string }
+            toCertificateSnapshot(sanitizedData.dataSnapshot)
           );
 
           changes.before.dataSnapshot = existing.metadata;
           changes.after.dataSnapshot = sanitizedData.dataSnapshot;
 
-          updateData.metadata = {
-            customFields: sanitizedData.dataSnapshot,
-          };
+          updateData.metadata = toMetadataJson(sanitizedData.dataSnapshot);
           updateData.finalText = finalText;
 
           if (sanitizedData.dataSnapshot.name) {
             updateData.applicantName = sanitizedData.dataSnapshot.name as string;
+          }
+          if (sanitizedData.dataSnapshot.name_bn) {
+            updateData.applicantNameBn = sanitizedData.dataSnapshot.name_bn as string;
           }
         }
 
@@ -347,7 +387,7 @@ export class CertificateService {
             entityName: existing.applicantName || undefined,
             description: `Certificate updated: ${existing.certificateNo}`,
             severity: "LOW",
-            changes,
+            changes: toAuditChangesJson(changes),
           });
         }
 
@@ -933,9 +973,9 @@ export class CertificateService {
 
         const historyEntry: PrintHistoryEntry = {
           printedAt: new Date(),
-          printedById: userId && isValidObjectId(userId) ? userId : undefined,
+          printedById: userId && isValidObjectId(userId) ? userId : null,
           method,
-          note,
+          note: note ?? null,
         };
 
         const newHistory = [...(certificate.printHistory || []), historyEntry];

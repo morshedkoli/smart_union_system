@@ -3,16 +3,23 @@
  * Replaces Mongoose static methods for ID generation
  */
 
-import type { PrismaClient, CertificateType, ReliefType, TransactionType } from "@prisma/client";
-
-type PrismaTransactionClient = Omit<PrismaClient, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">;
+import type { CertificateType, ReliefType, TransactionType } from "@prisma/client";
 
 /**
  * Generate citizen registration number
  * Format: CIT-{YEAR}-W{WARD}-{SEQUENCE}
  */
 export async function generateCitizenRegistrationNo(
-  prisma: PrismaClient | PrismaTransactionClient,
+  prisma: {
+    citizen: {
+      count: (args: {
+        where: {
+          registrationNo: { startsWith: string };
+          deletedAt: null;
+        };
+      }) => Promise<number>;
+    };
+  },
   wardNo: number,
   year?: number
 ): Promise<string> {
@@ -34,7 +41,15 @@ export async function generateCitizenRegistrationNo(
  * Format: {TYPE_CODE}-{YEAR}-{SEQUENCE}
  */
 export async function generateCertificateNo(
-  prisma: PrismaClient | PrismaTransactionClient,
+  prisma: {
+    certificate: {
+      count: (args: {
+        where: {
+          certificateNo: { startsWith: string };
+        };
+      }) => Promise<number>;
+    };
+  },
   type: CertificateType,
   year?: number
 ): Promise<string> {
@@ -56,7 +71,15 @@ export async function generateCertificateNo(
  * Format: REF-{TYPE_CODE}-{YEAR}-{SEQUENCE}
  */
 export async function generateCertificateReferenceNo(
-  prisma: PrismaClient | PrismaTransactionClient,
+  prisma: {
+    certificate: {
+      count: (args: {
+        where: {
+          referenceNo: { startsWith: string };
+        };
+      }) => Promise<number>;
+    };
+  },
   type: CertificateType,
   year?: number
 ): Promise<string> {
@@ -78,7 +101,15 @@ export async function generateCertificateReferenceNo(
  * Format: HT-{FISCAL_YEAR}-W{WARD}-{SEQUENCE}
  */
 export async function generateHoldingTaxReferenceNo(
-  prisma: PrismaClient | PrismaTransactionClient,
+  prisma: {
+    holdingTax: {
+      count: (args: {
+        where: {
+          referenceNo: { startsWith: string };
+        };
+      }) => Promise<number>;
+    };
+  },
   fiscalYear: string,
   ward: number
 ): Promise<string> {
@@ -98,7 +129,15 @@ export async function generateHoldingTaxReferenceNo(
  * Format: RP-{TYPE_CODE}-{YEAR}-{SEQUENCE}
  */
 export async function generateProgramCode(
-  prisma: PrismaClient | PrismaTransactionClient,
+  prisma: {
+    reliefProgram: {
+      count: (args: {
+        where: {
+          programCode: { startsWith: string };
+        };
+      }) => Promise<number>;
+    };
+  },
   type: ReliefType,
   year?: number
 ): Promise<string> {
@@ -120,7 +159,15 @@ export async function generateProgramCode(
  * Format: BEN-{PROGRAM_CODE}-{SEQUENCE}
  */
 export async function generateBeneficiaryNo(
-  prisma: PrismaClient | PrismaTransactionClient,
+  prisma: {
+    beneficiary: {
+      count: (args: {
+        where: {
+          beneficiaryNo: { startsWith: string };
+        };
+      }) => Promise<number>;
+    };
+  },
   programCode: string
 ): Promise<string> {
   const prefix = `BEN-${programCode}`;
@@ -139,7 +186,15 @@ export async function generateBeneficiaryNo(
  * Format: CB-{FISCAL_YEAR}-{TYPE}-{SEQUENCE}
  */
 export async function generateCashbookEntryNo(
-  prisma: PrismaClient | PrismaTransactionClient,
+  prisma: {
+    cashbook: {
+      count: (args: {
+        where: {
+          entryNo: { startsWith: string };
+        };
+      }) => Promise<number>;
+    };
+  },
   fiscalYear: string,
   type: TransactionType
 ): Promise<string> {
@@ -160,7 +215,18 @@ export async function generateCashbookEntryNo(
  * Format: RCP-{FISCAL_YEAR}-{SEQUENCE}
  */
 export async function generateReceiptNo(
-  prisma: PrismaClient | PrismaTransactionClient,
+  prisma: {
+    holdingTax: {
+      findMany: (args: {
+        where: {
+          fiscalYear: string;
+        };
+        select: {
+          payments: true;
+        };
+      }) => Promise<Array<{ payments: unknown[] }>>;
+    };
+  },
   fiscalYear: string
 ): Promise<string> {
   const prefix = `RCP-${fiscalYear.replace("-", "")}`;
@@ -220,7 +286,23 @@ export function getCurrentFiscalYear(): string {
  * Calculate cashbook balance for a union parishad
  */
 export async function getCashbookBalance(
-  prisma: PrismaClient | PrismaTransactionClient,
+  prisma: {
+    cashbook: {
+      findMany: (args: {
+        where: {
+          unionParishadId: string;
+          fiscalYear: string;
+          status: "APPROVED";
+          deletedAt: null;
+          transactionDate?: { lte: Date };
+        };
+        select: {
+          transactionType: true;
+          amount: true;
+        };
+      }) => Promise<Array<{ transactionType: TransactionType; amount: number }>>;
+    };
+  },
   unionParishadId: string,
   fiscalYear: string,
   upToDate?: Date

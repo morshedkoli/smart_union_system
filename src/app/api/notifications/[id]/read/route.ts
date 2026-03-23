@@ -2,6 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { getTokenFromHeader, verifyToken } from "@/lib/auth";
 import { NotificationService } from "@/services";
 
+interface RouteParams {
+  params: Promise<{ id: string }>;
+}
+
 async function resolveUserId(request: NextRequest): Promise<string | undefined> {
   const cookieToken = request.cookies.get("auth-token")?.value;
   const headerToken = getTokenFromHeader(request.headers.get("authorization"));
@@ -15,7 +19,7 @@ async function resolveUserId(request: NextRequest): Promise<string | undefined> 
   return payload?.userId;
 }
 
-export async function GET(request: NextRequest) {
+export async function PATCH(request: NextRequest, { params }: RouteParams) {
   try {
     const userId = await resolveUserId(request);
 
@@ -26,14 +30,22 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const summary = await NotificationService.getUserNotifications(userId, 6);
-    return NextResponse.json({ success: true, ...summary });
+    const { id } = await params;
+    const markedAsRead = await NotificationService.markAsRead(id, userId);
+
+    if (!markedAsRead) {
+      return NextResponse.json(
+        { success: false, message: "Notification not found" },
+        { status: 404 }
+      );
+    }
+
+    return NextResponse.json({ success: true });
   } catch (error) {
-    console.error("Notifications fetch error:", error);
+    console.error("Notification read error:", error);
     return NextResponse.json(
-      { success: false, message: "Failed to fetch notifications" },
+      { success: false, message: "Failed to update notification" },
       { status: 500 }
     );
   }
 }
-

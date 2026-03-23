@@ -15,7 +15,7 @@ import {
 } from "@/components/ui/table";
 
 interface CertificateItem {
-  _id: string;
+  id: string;
   referenceNo: string;
   certificateNo: string;
   applicantName: string;
@@ -33,10 +33,42 @@ export function ApprovalsContent({ locale }: { locale: string }) {
   const loadPending = async () => {
     setLoading(true);
     try {
-      const res = await fetch("/api/certificates?status=SUBMITTED");
+      const res = await fetch("/api/certificates?status=PENDING");
       const data = await res.json();
       if (data.success) {
-        setCertificates(data.certificates);
+        setCertificates(
+          (data.certificates || [])
+            .map(
+              (item: {
+                id?: string;
+                _id?: string;
+                referenceNo?: string;
+                certificateNo?: string | null;
+                applicantName?: string | null;
+                status?: string;
+                finalText?: string | null;
+                qrCode?: string | null;
+                verificationUrl?: string | null;
+              }) => {
+                const id = item.id || item._id;
+                if (!id) {
+                  return null;
+                }
+
+                return {
+                  id,
+                  referenceNo: item.referenceNo || "",
+                  certificateNo: item.certificateNo || "",
+                  applicantName: item.applicantName || "",
+                  status: item.status || "",
+                  finalText: item.finalText || "",
+                  qrCode: item.qrCode || undefined,
+                  verificationUrl: item.verificationUrl || undefined,
+                };
+              }
+            )
+            .filter((item: CertificateItem | null): item is CertificateItem => item !== null)
+        );
       }
     } finally {
       setLoading(false);
@@ -101,10 +133,10 @@ export function ApprovalsContent({ locale }: { locale: string }) {
                   </TableHeader>
                   <TableBody>
                     {certificates.map((item) => (
-                      <TableRow key={item._id}>
+                      <TableRow key={item.id}>
                         <TableCell>{item.referenceNo}</TableCell>
-                        <TableCell>{item.certificateNo}</TableCell>
-                        <TableCell>{item.applicantName}</TableCell>
+                        <TableCell>{item.certificateNo || "—"}</TableCell>
+                        <TableCell>{item.applicantName || "—"}</TableCell>
                         <TableCell>
                           <Badge variant="warning">{item.status}</Badge>
                         </TableCell>
@@ -112,8 +144,8 @@ export function ApprovalsContent({ locale }: { locale: string }) {
                           <div className="flex items-center justify-end gap-2">
                             <Button
                               size="sm"
-                              onClick={() => handleApprove(item._id)}
-                              disabled={approvingId === item._id}
+                              onClick={() => handleApprove(item.id)}
+                              disabled={approvingId === item.id}
                             >
                               {locale === "bn" ? "অনুমোদন" : "Approve"}
                             </Button>

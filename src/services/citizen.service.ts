@@ -2,7 +2,8 @@ import { prisma } from "@/lib/db";
 import { generateCitizenRegistrationNo, isValidObjectId } from "@/lib/prisma-utils";
 import { calculateAge } from "@/lib/prisma-virtuals";
 import { deepSanitize } from "@/lib/sanitize";
-import type { Citizen, Gender, MaritalStatus, CitizenStatus, Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
+import type { Citizen, Gender, MaritalStatus, CitizenStatus } from "@prisma/client";
 
 // Re-export enum values for backward compatibility
 export { CitizenStatus, Gender, MaritalStatus } from "@prisma/client";
@@ -57,6 +58,25 @@ export interface CitizenCreateData {
 
 export interface CitizenWithAge extends Citizen {
   age: number | null;
+}
+
+function formatCitizenPersistenceError(error: unknown): string {
+  if (error instanceof Prisma.PrismaClientKnownRequestError) {
+    if (error.code === "P2002") {
+      return "A citizen with this unique information already exists";
+    }
+  }
+
+  if (
+    error instanceof Error &&
+    (error.message.includes("TransientTransactionError") ||
+      error.message.includes("forcibly closed by the remote host") ||
+      error.message.includes("os error 10054"))
+  ) {
+    return "Database connection was interrupted. Please try again.";
+  }
+
+  return error instanceof Error ? error.message : "Failed to save citizen";
 }
 
 async function logAudit(data: {
@@ -190,11 +210,9 @@ export class CitizenService {
   ): Promise<{ success: boolean; citizen?: Citizen; message: string }> {
     // Sanitize input data
     const sanitizedData = deepSanitize(data);
-
-    return prisma.$transaction(async (tx) => {
-      // Check for duplicates
+    try {
       if (sanitizedData.nid) {
-        const existingNid = await tx.citizen.findFirst({
+        const existingNid = await prisma.citizen.findFirst({
           where: { nid: sanitizedData.nid, deletedAt: null },
         });
         if (existingNid) {
@@ -203,27 +221,29 @@ export class CitizenService {
       }
 
       if (sanitizedData.birthCertificateNo) {
-        const existingBc = await tx.citizen.findFirst({
-          where: { birthCertificateNo: sanitizedData.birthCertificateNo, deletedAt: null },
+        const existingBc = await prisma.citizen.findFirst({
+          where: {
+            birthCertificateNo: sanitizedData.birthCertificateNo,
+            deletedAt: null,
+          },
         });
         if (existingBc) {
           throw new Error("Birth certificate number already registered");
         }
       }
 
-      // Generate registration number
       const registrationNo = await generateCitizenRegistrationNo(
-        tx,
+        prisma,
         sanitizedData.presentAddress.ward
       );
 
-      const citizen = await tx.citizen.create({
+      const citizen = await prisma.citizen.create({
         data: {
           registrationNo,
           nid: sanitizedData.nid,
           birthCertificateNo: sanitizedData.birthCertificateNo,
           name: sanitizedData.name,
-          nameEn: sanitizedData.nameEn,
+          nameEn: sanitizedData.nameEn || sanitizedData.name,
           nameBn: sanitizedData.nameBn,
           fatherName: sanitizedData.fatherName,
           fatherNameBn: sanitizedData.fatherNameBn,
@@ -247,32 +267,27 @@ export class CitizenService {
         },
       });
 
-      // Log audit
-      if (createdBy && isValidObjectId(createdBy)) {
-        await tx.auditLog.create({
-          data: {
-            userId: createdBy,
-            action: "CREATE",
-            entityType: "CITIZEN",
-            entityId: citizen.id,
-            entityName: citizen.name,
-            description: `Citizen created: ${citizen.name} (${citizen.registrationNo})`,
-            severity: "LOW",
-          },
-        });
-      }
+      await logAudit({
+        userId: createdBy,
+        action: "CREATE",
+        entityType: "CITIZEN",
+        entityId: citizen.id,
+        entityName: citizen.name,
+        description: `Citizen created: ${citizen.name} (${citizen.registrationNo})`,
+        severity: "LOW",
+      });
 
       return {
         success: true,
         citizen,
         message: "Citizen registered successfully",
       };
-    }).catch((error) => {
+    } catch (error) {
       return {
         success: false,
-        message: error instanceof Error ? error.message : "Failed to create citizen",
+        message: formatCitizenPersistenceError(error),
       };
-    });
+    }
   }
 
   static async update(
@@ -287,8 +302,8 @@ export class CitizenService {
     // Sanitize input data
     const sanitizedData = deepSanitize(data);
 
-    return prisma.$transaction(async (tx) => {
-      const citizen = await tx.citizen.findUnique({
+    try {
+      const citizen = await prisma.citizen.findUnique({
         where: { id },
       });
 
@@ -296,9 +311,8 @@ export class CitizenService {
         throw new Error("Citizen not found");
       }
 
-      // Check for NID duplicate if changing
       if (sanitizedData.nid && sanitizedData.nid !== citizen.nid) {
-        const existingNid = await tx.citizen.findFirst({
+        const existingNid = await prisma.citizen.findFirst({
           where: {
             nid: sanitizedData.nid,
             id: { not: id },
@@ -310,7 +324,6 @@ export class CitizenService {
         }
       }
 
-      // Track changes for audit
       const changes: { before: Record<string, unknown>; after: Record<string, unknown> } = {
         before: {},
         after: {},
@@ -325,15 +338,19 @@ export class CitizenService {
         }
       });
 
-      await tx.citizen.updateMany({
+      await prisma.citizen.updateMany({
         where: { id },
         data: {
           ...sanitizedData,
+          nameEn:
+            sanitizedData.name !== undefined
+              ? sanitizedData.nameEn || sanitizedData.name
+              : sanitizedData.nameEn,
           updatedById: updatedBy,
         },
       });
 
-      const updatedCitizen = await tx.citizen.findUnique({
+      const updatedCitizen = await prisma.citizen.findUnique({
         where: { id },
       });
 
@@ -341,19 +358,16 @@ export class CitizenService {
         throw new Error("Citizen not found after update");
       }
 
-      // Log audit
-      if (updatedBy && isValidObjectId(updatedBy) && Object.keys(changes.before).length > 0) {
-        await tx.auditLog.create({
-          data: {
-            userId: updatedBy,
-            action: "UPDATE",
-            entityType: "CITIZEN",
-            entityId: citizen.id,
-            entityName: citizen.name,
-            description: `Citizen updated: ${citizen.name}`,
-            severity: "LOW",
-            changes,
-          },
+      if (Object.keys(changes.before).length > 0) {
+        await logAudit({
+          userId: updatedBy,
+          action: "UPDATE",
+          entityType: "CITIZEN",
+          entityId: citizen.id,
+          entityName: citizen.name,
+          description: `Citizen updated: ${citizen.name}`,
+          severity: "LOW",
+          changes,
         });
       }
 
@@ -362,12 +376,12 @@ export class CitizenService {
         citizen: updatedCitizen,
         message: "Citizen updated successfully",
       };
-    }).catch((error) => {
+    } catch (error) {
       return {
         success: false,
-        message: error instanceof Error ? error.message : "Failed to update citizen",
+        message: formatCitizenPersistenceError(error),
       };
-    });
+    }
   }
 
   static async delete(id: string, deletedBy?: string): Promise<{ success: boolean; message: string }> {
@@ -375,8 +389,8 @@ export class CitizenService {
       return { success: false, message: "Invalid citizen ID" };
     }
 
-    return prisma.$transaction(async (tx) => {
-      const citizen = await tx.citizen.findUnique({
+    try {
+      const citizen = await prisma.citizen.findUnique({
         where: { id },
       });
 
@@ -384,8 +398,7 @@ export class CitizenService {
         throw new Error("Citizen not found");
       }
 
-      // Soft delete
-      await tx.citizen.updateMany({
+      await prisma.citizen.updateMany({
         where: { id },
         data: {
           deletedAt: new Date(),
@@ -393,28 +406,23 @@ export class CitizenService {
         },
       });
 
-      // Log audit
-      if (deletedBy && isValidObjectId(deletedBy)) {
-        await tx.auditLog.create({
-          data: {
-            userId: deletedBy,
-            action: "SOFT_DELETE",
-            entityType: "CITIZEN",
-            entityId: citizen.id,
-            entityName: citizen.name,
-            description: `Citizen deleted: ${citizen.name} (${citizen.registrationNo})`,
-            severity: "MEDIUM",
-          },
-        });
-      }
+      await logAudit({
+        userId: deletedBy,
+        action: "SOFT_DELETE",
+        entityType: "CITIZEN",
+        entityId: citizen.id,
+        entityName: citizen.name,
+        description: `Citizen deleted: ${citizen.name} (${citizen.registrationNo})`,
+        severity: "MEDIUM",
+      });
 
       return { success: true, message: "Citizen deleted successfully" };
-    }).catch((error) => {
+    } catch (error) {
       return {
         success: false,
-        message: error instanceof Error ? error.message : "Failed to delete citizen",
+        message: formatCitizenPersistenceError(error),
       };
-    });
+    }
   }
 
   static async getStats(unionParishadId?: string): Promise<{

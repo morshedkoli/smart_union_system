@@ -7,7 +7,14 @@ export async function POST(request: NextRequest) {
 
     const previewData = {
       name: body.previewData?.name,
+      name_en: body.previewData?.name_en,
+      name_bn: body.previewData?.name_bn,
       father_name: body.previewData?.father_name,
+      father_name_en: body.previewData?.father_name_en,
+      father_name_bn: body.previewData?.father_name_bn,
+      mother_name: body.previewData?.mother_name,
+      mother_name_en: body.previewData?.mother_name_en,
+      mother_name_bn: body.previewData?.mother_name_bn,
     };
 
     if (body.templateId) {

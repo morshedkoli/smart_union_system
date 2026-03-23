@@ -17,7 +17,10 @@ async function resolveUserId(request: NextRequest): Promise<string | undefined> 
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
-    const status = searchParams.get("status") as CertificateStatus | null;
+    const rawStatus = searchParams.get("status");
+    const normalizedStatus =
+      rawStatus === "SUBMITTED" ? "PENDING" : rawStatus;
+    const status = normalizedStatus as CertificateStatus | null;
     const certificates = await CertificateService.list(status || undefined);
     return NextResponse.json({ success: true, certificates });
   } catch (error) {

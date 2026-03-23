@@ -34,7 +34,7 @@ import { SUPPORTED_CERTIFICATE_PLACEHOLDERS } from "@/lib/certificate-template";
 type TemplateStatus = "ACTIVE" | "INACTIVE" | "DRAFT";
 
 interface CertificateTemplate {
-  _id: string;
+  id: string;
   name: string;
   nameEn: string;
   nameBn: string;
@@ -49,6 +49,23 @@ interface CertificateTemplate {
   updatedAt: string;
 }
 
+interface CertificateTemplateApiItem {
+  id?: string;
+  _id?: string;
+  name?: string;
+  nameEn?: string;
+  nameBn?: string;
+  certificateType?: string;
+  bodyHtml?: string;
+  headerHtml?: string | null;
+  footerHtml?: string | null;
+  stylesCss?: string | null;
+  status?: TemplateStatus;
+  fee?: number;
+  placeholders?: string[];
+  updatedAt?: string | Date;
+}
+
 interface TemplateFormState {
   name: string;
   nameEn: string;
@@ -61,7 +78,9 @@ interface TemplateFormState {
   footerHtml: string;
   stylesCss: string;
   previewName: string;
+  previewNameBn: string;
   previewFatherName: string;
+  previewFatherNameBn: string;
 }
 
 const certificateTypeOptions = [
@@ -87,7 +106,9 @@ const defaultTemplateForm: TemplateFormState = {
   footerHtml: "",
   stylesCss: "body { font-family: Arial, sans-serif; line-height: 1.6; }",
   previewName: "Rahim Uddin",
+  previewNameBn: "রহিম উদ্দিন",
   previewFatherName: "Karim Uddin",
+  previewFatherNameBn: "করিম উদ্দিন",
 };
 
 export function TemplatesContent({ locale }: { locale: string }) {
@@ -108,6 +129,38 @@ export function TemplatesContent({ locale }: { locale: string }) {
     []
   );
 
+  const normalizeTemplates = useCallback(
+    (items: CertificateTemplateApiItem[]): CertificateTemplate[] =>
+      items.reduce<CertificateTemplate[]>((normalized, item) => {
+          const id = item.id || item._id;
+          if (!id) {
+            return normalized;
+          }
+
+          normalized.push({
+            id,
+            name: item.name || "",
+            nameEn: item.nameEn || "",
+            nameBn: item.nameBn || "",
+            certificateType: item.certificateType || "",
+            bodyHtml: item.bodyHtml || "",
+            headerHtml: item.headerHtml || undefined,
+            footerHtml: item.footerHtml || undefined,
+            stylesCss: item.stylesCss || undefined,
+            status: item.status || "DRAFT",
+            fee: item.fee ?? 0,
+            placeholders: item.placeholders || [],
+            updatedAt:
+              typeof item.updatedAt === "string"
+                ? item.updatedAt
+                : item.updatedAt?.toISOString() || "",
+          });
+
+          return normalized;
+        }, []),
+    []
+  );
+
   const fetchTemplates = useCallback(async () => {
     setLoading(true);
     setError("");
@@ -118,13 +171,13 @@ export function TemplatesContent({ locale }: { locale: string }) {
       if (!data.success) {
         throw new Error(data.message || "Failed to load templates");
       }
-      setTemplates(data.templates);
+      setTemplates(normalizeTemplates(data.templates || []));
     } catch (fetchError) {
       setError(fetchError instanceof Error ? fetchError.message : "Failed to load templates");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [normalizeTemplates]);
 
   const generatePreview = useCallback(async () => {
     setPreviewLoading(true);
@@ -139,7 +192,11 @@ export function TemplatesContent({ locale }: { locale: string }) {
           stylesCss: form.stylesCss,
           previewData: {
             name: form.previewName,
+            name_en: form.previewName,
+            name_bn: form.previewNameBn,
             father_name: form.previewFatherName,
+            father_name_en: form.previewFatherName,
+            father_name_bn: form.previewFatherNameBn,
           },
         }),
       });
@@ -178,7 +235,7 @@ export function TemplatesContent({ locale }: { locale: string }) {
   };
 
   const openEditEditor = (template: CertificateTemplate) => {
-    setEditingTemplateId(template._id);
+    setEditingTemplateId(template.id);
     setForm({
       name: template.name,
       nameEn: template.nameEn,
@@ -191,7 +248,9 @@ export function TemplatesContent({ locale }: { locale: string }) {
       footerHtml: template.footerHtml || "",
       stylesCss: template.stylesCss || "",
       previewName: "Rahim Uddin",
+      previewNameBn: "রহিম উদ্দিন",
       previewFatherName: "Karim Uddin",
+      previewFatherNameBn: "করিম উদ্দিন",
     });
     setPreviewHtml("");
     setError("");
@@ -296,7 +355,7 @@ export function TemplatesContent({ locale }: { locale: string }) {
             ) : (
               <div className="grid gap-4 md:grid-cols-2">
                 {templates.map((template) => (
-                  <div key={template._id} className="rounded-lg border p-4 space-y-3">
+                  <div key={template.id} className="rounded-lg border p-4 space-y-3">
                     <div className="flex items-start justify-between gap-3">
                       <div>
                         <p className="font-semibold">{template.nameEn || template.name}</p>
@@ -472,18 +531,36 @@ export function TemplatesContent({ locale }: { locale: string }) {
                 </CardHeader>
                 <CardContent className="space-y-3">
                   <div className="space-y-2">
-                    <Label>{`{{name}}`}</Label>
+                    <Label>{locale === "bn" ? "নাম (ইংরেজি)" : "Name (English)"}</Label>
                     <Input
                       value={form.previewName}
                       onChange={(e) => setForm((prev) => ({ ...prev, previewName: e.target.value }))}
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label>{`{{father_name}}`}</Label>
+                    <Label>{locale === "bn" ? "নাম (বাংলা)" : "Name (Bangla)"}</Label>
+                    <Input
+                      value={form.previewNameBn}
+                      onChange={(e) =>
+                        setForm((prev) => ({ ...prev, previewNameBn: e.target.value }))
+                      }
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>{locale === "bn" ? "পিতার নাম (ইংরেজি)" : "Father's Name (English)"}</Label>
                     <Input
                       value={form.previewFatherName}
                       onChange={(e) =>
                         setForm((prev) => ({ ...prev, previewFatherName: e.target.value }))
+                      }
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>{locale === "bn" ? "পিতার নাম (বাংলা)" : "Father's Name (Bangla)"}</Label>
+                    <Input
+                      value={form.previewFatherNameBn}
+                      onChange={(e) =>
+                        setForm((prev) => ({ ...prev, previewFatherNameBn: e.target.value }))
                       }
                     />
                   </div>

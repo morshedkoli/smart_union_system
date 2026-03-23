@@ -28,12 +28,15 @@ interface HeaderProps {
 
 interface NotificationAlert {
   id: string;
-  kind: "TAX_UNPAID" | "PENDING_APPROVAL";
   title: string;
+  titleBn?: string | null;
   message: string;
-  severity: "warning" | "info";
+  messageBn?: string | null;
+  type: string;
+  category: string;
   createdAt: string;
-  link: string;
+  link?: string | null;
+  readAt?: string | null;
 }
 
 export function Header({ sidebarCollapsed }: HeaderProps) {
@@ -47,11 +50,16 @@ export function Header({ sidebarCollapsed }: HeaderProps) {
 
   const loadNotifications = React.useCallback(async () => {
     try {
-      const res = await fetch("/api/notifications");
+      const res = await fetch("/api/notifications", {
+        cache: "no-store",
+      });
       const data = await res.json();
       if (data.success) {
         setNotificationCount(data.unreadCount || 0);
         setAlerts((data.alerts || []) as NotificationAlert[]);
+      } else {
+        setNotificationCount(0);
+        setAlerts([]);
       }
     } catch {
       setNotificationCount(0);
@@ -70,7 +78,33 @@ export function Header({ sidebarCollapsed }: HeaderProps) {
     loadNotifications();
   }, [loadNotifications]);
 
-  const openAlert = (alert: NotificationAlert) => {
+  const openAlert = async (alert: NotificationAlert) => {
+    if (!alert.readAt) {
+      try {
+        const res = await fetch(`/api/notifications/${alert.id}/read`, {
+          method: "PATCH",
+        });
+
+        if (res.ok) {
+          const readAt = new Date().toISOString();
+          setAlerts((currentAlerts) =>
+            currentAlerts.map((currentAlert) =>
+              currentAlert.id === alert.id
+                ? { ...currentAlert, readAt }
+                : currentAlert
+            )
+          );
+          setNotificationCount((currentCount) => Math.max(0, currentCount - 1));
+        }
+      } catch {
+        // Keep navigation working even if the badge update fails.
+      }
+    }
+
+    if (!alert.link) {
+      return;
+    }
+
     const localPath = alert.link.startsWith("/") ? alert.link : `/${alert.link}`;
     router.push(`/${locale}${localPath}`);
   };
@@ -149,26 +183,39 @@ export function Header({ sidebarCollapsed }: HeaderProps) {
                 alerts.map((alert) => (
                   <DropdownMenuItem
                     key={alert.id}
-                    className="flex cursor-pointer flex-col items-start gap-1 py-3"
-                    onSelect={(e) => {
+                    className={cn(
+                      "flex cursor-pointer flex-col items-start gap-1 py-3",
+                      !alert.readAt && "bg-muted/40"
+                    )}
+                    onSelect={async (e) => {
                       e.preventDefault();
-                      openAlert(alert);
+                      await openAlert(alert);
                     }}
                   >
                     <div className="flex w-full items-center justify-between gap-2">
-                      <span className="text-sm font-medium">{alert.title}</span>
+                      <span className={cn("text-sm", !alert.readAt && "font-medium")}>
+                        {locale === "bn" ? alert.titleBn || alert.title : alert.title}
+                      </span>
                       <span
                         className={cn(
                           "rounded px-1.5 py-0.5 text-[10px] font-semibold",
-                          alert.severity === "warning"
-                            ? "bg-yellow-100 text-yellow-800"
+                          alert.readAt
+                            ? "bg-muted text-muted-foreground"
                             : "bg-blue-100 text-blue-800"
                         )}
                       >
-                        {alert.kind}
+                        {alert.readAt
+                          ? locale === "bn"
+                            ? "পঠিত"
+                            : "READ"
+                          : locale === "bn"
+                            ? "অপঠিত"
+                            : "UNREAD"}
                       </span>
                     </div>
-                    <span className="text-xs text-muted-foreground">{alert.message}</span>
+                    <span className="text-xs text-muted-foreground">
+                      {locale === "bn" ? alert.messageBn || alert.message : alert.message}
+                    </span>
                     <span className="text-[11px] text-muted-foreground">
                       {new Date(alert.createdAt).toLocaleString()}
                     </span>
